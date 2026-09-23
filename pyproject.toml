@@ -55,6 +55,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+robodojo = [
+    "open3d==0.19.0",
+    "opencv-python-headless>=4.8,<4.12",
+    "scipy>=1.11,<2.0",
+]
 libero = [
     "robosuite==1.5.2",
     "mujoco==3.9.0",

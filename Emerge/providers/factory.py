@@ -29,7 +29,12 @@ def create_provider(
     elif provider_name == "custom":
         from Emerge.providers.custom_provider import CustomProvider
 
-        provider = CustomProvider(
+        if (config.get_api_base(selected_model) or "").rstrip("/").endswith("/responses"):
+            from Emerge.providers.responses_provider import ResponsesProvider
+            provider_class = ResponsesProvider
+        else:
+            provider_class = CustomProvider
+        provider = provider_class(
             api_key=(provider_config.api_key or "no-key"),
             api_base=(
                 config.get_api_base(selected_model)

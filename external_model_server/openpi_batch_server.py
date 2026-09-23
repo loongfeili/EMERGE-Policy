@@ -552,7 +552,13 @@ def create_policy(*, config_name: str, checkpoint_dir: str) -> Any:
     from openpi.policies import policy_config
     from openpi.training import config as openpi_config
 
-    train_config = openpi_config.get_config(config_name)
+    from robot.vla.robodojo_policy import build_train_config, is_robodojo_config, resolve_checkpoint_dir
+
+    if is_robodojo_config(config_name):
+        checkpoint_dir = str(resolve_checkpoint_dir(checkpoint_dir))
+        train_config = build_train_config(checkpoint_dir)
+    else:
+        train_config = openpi_config.get_config(config_name)
     logger.info(
         "Loaded openpi TrainConfig(name=%s): %s",
         config_name,

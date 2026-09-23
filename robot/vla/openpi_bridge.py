@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import inspect
 from typing import Any
 import urllib.parse
 import urllib.request
@@ -32,7 +33,8 @@ def _parse_server_endpoint(server_url: str) -> tuple[str, int, str]:
     host = parsed.hostname or "localhost"
     port = int(parsed.port or _DEFAULT_SERVER_PORT)
     http_scheme = "https" if parsed.scheme in {"https", "wss"} else "http"
-    return host, port, f"{http_scheme}://{host}:{port}"
+    authority = f"[{host}]" if ":" in host else host
+    return host, port, f"{http_scheme}://{authority}:{port}"
 
 
 class Pi05Client:
@@ -49,6 +51,7 @@ class Pi05Client:
         )
         self._timeout = float(timeout)
         self._client: Any | None = None
+        self.last_error: str | None = None
 
     @property
     def host(self) -> str:
@@ -81,11 +84,15 @@ class Pi05Client:
     def infer(self, element: dict[str, Any]) -> dict[str, Any]:
         """Run one policy inference and normalize its action array."""
         if self._client is None and not self.health_check():
-            raise RuntimeError(
-                f"OpenPI policy server is unavailable at {self._http_base}"
-            )
+            self.last_error = f"OpenPI policy server is unavailable at {self._http_base}"
+            raise RuntimeError(self.last_error)
 
-        result = self._ensure_client().infer(element)
+        try:
+            result = self._ensure_client().infer(element)
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            self.close()
+            raise
         if "actions" in result:
             import numpy as np
 
@@ -98,6 +105,8 @@ class Pi05Client:
 
     def close(self) -> None:
         """Release the lazy websocket client reference."""
+        if self._client is not None:
+            self._client.close()
         self._client = None
 
     def _ensure_client(self) -> Any:
@@ -107,13 +116,38 @@ class Pi05Client:
         for env_name in ("NO_PROXY", "no_proxy"):
             current = os.environ.get(env_name, "")
             hosts = {item.strip() for item in current.split(",") if item.strip()}
-            hosts.update({"localhost", "127.0.0.1", "::1"})
+            hosts.update({"localhost", "127.0.0.1", "::1", self._host})
             os.environ[env_name] = ",".join(sorted(hosts))
 
-        from openpi_client import websocket_client_policy
-
-        self._client = websocket_client_policy.WebsocketClientPolicy(
-            self._host,
-            self._port,
-        )
+        self._client = _BoundedPolicyConnection(self._host, self._port, self._timeout)
         return self._client
+
+
+class _BoundedPolicyConnection:
+    """Same binary OpenPI protocol, with bounded handshake and inference waits."""
+    def __init__(self, host: str, port: int, timeout: float):
+        from websockets.sync.client import connect
+        from external_model_server.protocol import unpack_message
+
+        authority = f"[{host}]" if ":" in host else host
+        options = dict(compression=None, max_size=None, open_timeout=timeout)
+        if "proxy" in inspect.signature(connect).parameters:
+            options["proxy"] = None
+        self._timeout = timeout
+        self._socket = connect(f"ws://{authority}:{port}", **options)
+        try:
+            self.metadata = unpack_message(self._socket.recv(timeout=timeout))
+        except BaseException:
+            self._socket.close()
+            raise
+
+    def infer(self, observation):
+        from external_model_server.protocol import pack_message, unpack_message
+        self._socket.send(pack_message(observation))
+        response = self._socket.recv(timeout=self._timeout)
+        if isinstance(response, str):
+            raise RuntimeError(f"OpenPI inference error: {response}")
+        return unpack_message(response)
+
+    def close(self):
+        self._socket.close()

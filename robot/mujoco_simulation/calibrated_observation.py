@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
-from robot.mujoco_simulation.mujoco_camera import MujocoCamera
+if TYPE_CHECKING:
+    from robot.mujoco_simulation.mujoco_camera import MujocoCamera
 
 
 class CalibratedObservationWriter:
