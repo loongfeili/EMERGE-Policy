@@ -129,3 +129,9 @@ def test_official_unstable_scene_is_excluded_not_a_policy_failure():
     task=result['official_protocol_seed0']['task_scores']['insert_key']
     assert task['complete'] and task['score_percent']==50
     assert task['official_excluded_episodes']==1
+
+
+def test_agent_budget_exhaustion_does_not_trigger_selective_retry():
+    m=load_script('eval_robodojo_agent')
+    assert m._termination_reason({'finished':True,'success':False,'agent_finish_reason':'max_iterations'},timed_out=False,llm_failed=False,returncode=1)=='official_failure:agent_budget_exhausted'
+    assert m._termination_reason({'finished':True,'success':False},timed_out=False,llm_failed=True,returncode=1)=='infrastructure_error:llm'

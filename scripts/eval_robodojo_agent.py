@@ -378,6 +378,8 @@ def _termination_reason(
     # The worker marks itself finished once the supervisor signals that the
     # agent exited, whether or not the agent did any work, so a crashed or
     # unconfigured agent otherwise lands in the results as a task failure.
+    if status.get("finished") and status.get("agent_finish_reason") in {"max_iterations", "length"}:
+        return "success" if status.get("success") else "official_failure:agent_budget_exhausted"
     if not status.get("finished") or (not timed_out and returncode != 0):
         return f"infrastructure_error:runner_exit_{returncode}"
     if status.get("official_excluded"):
@@ -468,6 +470,7 @@ def _run_episode(
         device_slots.put(device_id)
 
     status = _load_json(workspace / "episode_status.json")
+    status["agent_finish_reason"] = _load_json(workspace / "agent_run" / "result.json").get("finish_reason")
     termination_reason = _termination_reason(
         status,
         timed_out=timed_out,
@@ -487,6 +490,7 @@ def _run_episode(
         "official_excluded": bool(status.get("official_excluded")),
         "termination_reason": termination_reason,
         "returncode": returncode,
+        "agent_finish_reason": status.get("agent_finish_reason"),
         "error": error,
         "duration_s": round(time.monotonic() - start, 3),
         "started_at": started_at,
@@ -527,6 +531,8 @@ def _persistent_result(
     batch_log_path: Path,
     model_metadata: dict[str, Any],
 ) -> dict[str, Any]:
+    agent_result = _load_json(workspace / "agent_run" / "result.json")
+    status = {**status, "agent_finish_reason": agent_result.get("finish_reason")}
     finished = bool(status.get("finished"))
     timed_out = bool(status.get("timed_out"))
     returncode = int(
@@ -574,6 +580,7 @@ def _persistent_result(
         "official_excluded": bool(status.get("official_excluded")),
         "termination_reason": termination_reason,
         "returncode": returncode,
+        "agent_finish_reason": status.get("agent_finish_reason"),
         "error": error,
         "duration_s": round(float(duration_s), 3),
         "started_at": started_at,
