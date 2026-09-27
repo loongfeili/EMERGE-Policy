@@ -1,6 +1,6 @@
 # Merlin 上的可扩展 RoboDojo / EMERGE 评测
 
-本目录是部署入口。算法代码以 `https://github.com/loongfeili/EMERGE-Policy` 的 `robodojo` 分支为发布源；环境以 `https://github.com/loongfeili/RoboDojo` 为源。每次发布固定完整 commit，每个 Pod 都从 GitHub fetch 并 checkout 该 commit；不把未提交补丁叠在部署源码上。
+本目录是部署入口。算法代码以 `https://github.com/loongfeili/EMERGE-Policy` 的 `robodojo` 分支为发布源；环境以 `https://github.com/loongfeili/RoboDojo` 为源。每次发布固定完整 commit，每个 Pod 都从 GitHub fetch 并 checkout 该 commit（隔离全局Git配置，HTTP/1.1传输，最多5次有界重试）；不把未提交补丁叠在部署源码上。
 
 当前工程流程正在做首次独立验证，验证结果和示例 trial 将在验证完成后写入本文。不要将历史 r11 的“曾经运行”视作新流程已通过。
 
@@ -51,6 +51,12 @@ python deployment/merlin/launch.py \
 确认配置后同一命令加 `--submit`。脚本使用 `job-v2 runs get-request-config`恢复完整job配置，覆盖完整env_map/资源/挂载，调用平台precheck和fork；敏感请求只短暂存于0600临时文件，随后删除。receipt只记录job链接、公开配置和变量名。receipt存在时拒绝重复提交；如停在submitting，先查平台是否已创建，不能因查询超时再提交一份。
 
 模型固定为 `gpt-6-astra`，服务地址 `https://edge.lingsuan.org`，实际请求 `/v1/responses`。`EMERGE_API_KEY`只从调用者环境或私有env文件读取，主Agent、定位和验证使用同一模型默认值。`EMERGE_RESPONSES_PROXY`用于API代理；`EMERGE_ASSET_PROXY`用于GitHub/NVIDIA资产访问。公开示例不含key。用户提供的是SSH公钥，可用于 `VSCODE_SSH_KEY`，不能拿公钥充当Git私钥；当前开发机已有loongfeili的有效SSH认证。Pod读取公开fork使用HTTPS，无需分发私钥。
+
+### 平台环境变量日志限制（实测）
+
+2026-09-28的L20 trial422819582中，平台的 `/opt/tiger/arnold/arnold_entrypoint/entrypoint.sh:29` 在用户脚本执行前无条件运行 `env | LC_ALL=C sort`。因此通过 `env_map` 注入的API key会出现在平台启动stdout；不能将普通env_map称为加密Secret存储。代码、HDFS发布物、应用日志和结果导出不写key，但这不能消除平台更早的环境打印。查询创建schema和平台环境变量文档未找到可验证的关闭/脱敏开关，没有修改或绕过平台启动器。
+
+当前按用户指定的Merlin环境变量接口传参。原始平台日志按敏感资料处理，不复制到公开报告或Git；本次已进入启动日志的key建议由持有人轮换。要彻底消除这一平台日志可见性，需要平台提供日志脱敏或原生Secret注入支持，不能靠在用户入口脚本里unset补救。凭据文档仅在本机0600文件中。
 
 ## 推理服务与冷启动验证
 

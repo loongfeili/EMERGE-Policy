@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 
@@ -83,6 +84,17 @@ class DeploymentTests(unittest.TestCase):
         infer = publish.resources("infer", 2, 4)["arnold_resource_config"]
         self.assertEqual(infer["group_id"], 1894)
         self.assertEqual(infer["roles"][0]["queue_name"], "a100-sxm-80gb.hpccluster-ydfgrrp7ac9tiffwmqs7.ai")
+
+    def test_git_fetch_retries_transient_failure_but_remains_bounded(self):
+        checkout = module("git_checkout")
+        failure = subprocess.CalledProcessError(128, ["git", "fetch"])
+        with patch.object(checkout, "git", side_effect=[failure, failure, ""]) as git, patch.object(checkout.time, "sleep"):
+            checkout.fetch(Path("test-repo"), "robodojo")
+            self.assertEqual(git.call_count, 3)
+        with patch.object(checkout, "git", side_effect=failure) as git, patch.object(checkout.time, "sleep"):
+            with self.assertRaises(subprocess.CalledProcessError):
+                checkout.fetch(Path("test-repo"), "robodojo")
+            self.assertEqual(git.call_count, 5)
 
 
 if __name__ == "__main__":
