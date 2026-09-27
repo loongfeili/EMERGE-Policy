@@ -20,7 +20,8 @@ def cli(command, payload, *, dry_run=False):
         args = ["merlin-cli", "--control-plane", "cn-seed", *command, "--from-file", str(path)]
         if dry_run:
             args.append("--dry-run")
-        result = subprocess.run(args, capture_output=True, text=True, timeout=180)
+        # Merlin restricts --from-file to the caller's working directory.
+        result = subprocess.run(args, cwd=temporary, capture_output=True, text=True, timeout=180)
     if result.returncode:
         raise RuntimeError("Merlin command failed: " + " ".join(command) + "; inspect the platform with a read-only command")
     if dry_run:
