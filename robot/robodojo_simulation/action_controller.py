@@ -519,9 +519,9 @@ class RoboDojoActionController:
         Left to compose its own recovery the agent produced absolute poses the
         arm could not reach and gripper commands that changed nothing -- four
         interventions across sixty episodes, none of which worked. These
-        sequences are built from relative motion off the arm's current pose, so
-        they cannot ask for an unreachable target, and each names the situation
-        it undoes rather than a geometry the agent has to derive.
+        sequences use relative targets to simplify recovery planning. Those
+        targets can still be unreachable, so every primitive result must be
+        checked before continuing or reporting recovery progress.
         """
         mode = str(params.get("mode", "release_and_retreat")).strip().lower()
         if mode not in self._RECOVERIES:
@@ -530,20 +530,35 @@ class RoboDojoActionController:
             )
         arm = self._require_single_arm(params)
         height = float(params.get("clearance_m", 0.12))
+        if not math.isfinite(height) or height <= 0:
+            raise ValueError("recover.clearance_m must be finite and positive")
         steps = max(1, int(params.get("steps", self.move_linear_steps * 2)))
         done: list[str] = []
 
+        def check_result(result: str) -> str | None:
+            if result.startswith(("Failed:", "Interrupted:", "Unknown action")):
+                return result
+            if self._terminal():
+                return self._terminal_action_result("recover")
+            return None
+
         if mode in ("release_and_retreat", "open_gripper"):
-            self._set_gripper({"arm": arm, "command": "open"})
-            done.append("opened the gripper")
+            result = self._set_gripper({"arm": arm, "command": "open"})
+            if stopped := check_result(result):
+                return stopped
+            done.append("applied the gripper-open command")
         if mode in ("release_and_retreat", "retreat", "park"):
-            self._move_linear({"arm": arm, "delta_m": [0.0, 0.0, height], "steps": steps})
+            result = self._move_linear({"arm": arm, "delta_m": [0.0, 0.0, height], "steps": steps})
+            if stopped := check_result(result):
+                return stopped
             done.append(f"lifted {height * 100:.0f} cm clear")
         if mode == "park":
             # Straight back from the table rather than to a fixed home pose: the
             # workspace differs per task and an absolute target risks the same
             # unreachable-pose failure this exists to avoid.
-            self._move_linear({"arm": arm, "delta_m": [0.0, -0.15, 0.0], "steps": steps})
+            result = self._move_linear({"arm": arm, "delta_m": [0.0, -0.15, 0.0], "steps": steps})
+            if stopped := check_result(result):
+                return stopped
             done.append("moved the arm out of the way")
 
         return f"RoboDojo recovery '{mode}' on arm {arm}: {', '.join(done)}."

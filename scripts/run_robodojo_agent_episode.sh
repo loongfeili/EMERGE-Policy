@@ -185,7 +185,7 @@ if [[ -n "${AGENT_CONFIG}" ]]; then
 fi
 
 set +e
-"${AGENT_PYTHON}" "${agent_args[@]}" >"${WORKSPACE}/agent.log" 2>&1 &
+EMERGE_POLICY_BACKEND=vla "${AGENT_PYTHON}" "${agent_args[@]}" >"${WORKSPACE}/agent.log" 2>&1 &
 AGENT_PID=$!
 while kill -0 "${AGENT_PID}" 2>/dev/null && kill -0 "${WORKER_PID}" 2>/dev/null; do
   sleep 1

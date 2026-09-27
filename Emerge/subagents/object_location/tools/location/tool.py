@@ -12,7 +12,7 @@ from Emerge.subagents.object_location.tools.location.engine import (
 
 
 class LocateCandidatesTool(Tool):
-    """Turn agent-confirmed candidate masks into measured world geometry."""
+    """Turn agent-confirmed candidate masks into measured geometry in the observation coordinate frame."""
 
     def __init__(self, engine: LocationEngine) -> None:
         self._engine = engine
@@ -26,7 +26,7 @@ class LocateCandidatesTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Compute world geometry from candidate masks already returned by "
+            "Compute geometry in the observation coordinate frame from candidate masks already returned by "
             "segment_candidates. Call this only after visually reviewing the "
             "full-view overlays and confirming which candidate is the requested "
             "semantic object. For every camera view, select the # instance whose "

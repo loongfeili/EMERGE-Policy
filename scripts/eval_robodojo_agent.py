@@ -27,6 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from robot.robodojo_simulation.evaluation_health import pause_on_provider_error
+
 # Keep the source path stable even when the repository is reached through a
 # symlink; callers can choose separate local scratch with ROBODOJO_EVAL_SCRATCH.
 REPO_ROOT = Path(__file__).absolute().parents[1]
@@ -401,8 +403,11 @@ def _run_episode(
     output_dir: Path,
     device_slots: queue.Queue[int],
     model_metadata: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     device_id = device_slots.get()
+    if (output_dir / "API_STOP.json").exists():
+        device_slots.put(device_id)
+        return None
     started_at = _utc_now()
     start = time.monotonic()
     episode_root = (
@@ -454,7 +459,7 @@ def _run_episode(
                 completed = subprocess.run(
                     command,
                     cwd=REPO_ROOT,
-                    env=_runtime_env(),
+                    env={**_runtime_env(), "ROBODOJO_EVAL_STOP_FILE": str(output_dir / "API_STOP.json")},
                     stdout=runner_log,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -467,6 +472,7 @@ def _run_episode(
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     finally:
+        pause_on_provider_error(workspace, output_dir / "API_STOP.json")
         device_slots.put(device_id)
 
     status = _load_json(workspace / "episode_status.json")
@@ -623,7 +629,7 @@ def _run_persistent_task_batch(
 ) -> None:
     """Run a same-task slice in one AppLauncher and stream completed results."""
 
-    if not specs:
+    if not specs or (output_dir / "API_STOP.json").exists():
         return
     task = str(specs[0]["task"])
     if any(str(spec["task"]) != task for spec in specs):
@@ -717,7 +723,7 @@ def _run_persistent_task_batch(
         process = subprocess.Popen(
             command,
             cwd=REPO_ROOT,
-            env=_runtime_env(),
+            env={**_runtime_env(), "ROBODOJO_EVAL_STOP_FILE": str(output_dir / "API_STOP.json")},
             stdout=batch_log,
             stderr=subprocess.STDOUT,
             text=True,
@@ -772,6 +778,8 @@ def _run_persistent_task_batch(
         if key in reported:
             continue
         status = _load_json(entry["workspace"] / "episode_status.json")
+        if (output_dir / "API_STOP.json").exists() and not status.get("finished"):
+            continue  # Unattempted layouts remain pending for --resume.
         on_result(
             _persistent_result(
                 spec=entry["spec"],
@@ -796,10 +804,13 @@ def _persistent_slot_assignments(
 
     assignments: list[list[dict[str, Any]]] = [[] for _ in range(slot_count)]
     task_offsets: dict[str, int] = {}
+    task_start_slots: dict[str, int] = {}
     for spec in specs:
         task = str(spec["task"])
+        if task not in task_start_slots:
+            task_start_slots[task] = min(range(slot_count), key=lambda i: len(assignments[i]))
         offset = task_offsets.get(task, 0)
-        assignments[offset % slot_count].append(spec)
+        assignments[(task_start_slots[task] + offset) % slot_count].append(spec)
         task_offsets[task] = offset + 1
     return assignments
 
@@ -815,7 +826,7 @@ def _run_persistent_slot(
     on_result: Callable[[dict[str, Any]], None],
 ) -> None:
     cursor = 0
-    while cursor < len(specs):
+    while cursor < len(specs) and not (output_dir / "API_STOP.json").exists():
         task = str(specs[cursor]["task"])
         end = cursor + 1
         while end < len(specs) and str(specs[end]["task"]) == task:
@@ -887,13 +898,6 @@ def _sync_completed_result(
         return
     try:
         sync_dir.mkdir(parents=True, exist_ok=True)
-        for name in ("run_config.json", "results.jsonl", "summary.json"):
-            source = output_dir / name
-            if source.exists():
-                destination = sync_dir / name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-
         episode_dir = Path(str(result["episode_dir"])).resolve()
         relative_episode = episode_dir.relative_to(output_dir.resolve())
         shutil.copytree(
@@ -920,7 +924,25 @@ def _sync_completed_result(
                     / episode_dir.name
                 )
                 shutil.copytree(save_dir, destination, dirs_exist_ok=True)
+        # Publish aggregate metadata only after the episode artifacts arrive.
+        # Readers on another node must never observe a partially copied JSONL.
+        for name in ("run_config.json", "results.jsonl", "summary.json"):
+            source = output_dir / name
+            if source.exists():
+                destination = sync_dir / name
+                temporary = destination.with_name(f".{name}.{os.getpid()}.tmp")
+                shutil.copy2(source, temporary)
+                os.replace(temporary, destination)
     except (OSError, ValueError) as exc:
+        # A storage failure must stop new episodes just like an unavailable API;
+        # retain completed local results for recovery, without relabeling scores.
+        _atomic_write_json(output_dir / "STORAGE_ERROR.json", {
+            "reason": "result_sync_failed", "error": str(exc),
+            "episode_key": result.get("episode_key"), "updated_at": _utc_now(),
+        })
+        stop_file = output_dir / "API_STOP.json"
+        if not stop_file.exists():
+            _atomic_write_json(stop_file, {"reason": "result_sync_failed"})
         print(f"[robodojo-eval] WARNING sync failed: {exc}", flush=True)
 
 
@@ -1242,6 +1264,8 @@ def main() -> None:
         )
     if not pending:
         return
+    # An explicit fresh invocation/resume retries the repaired provider.
+    (output_dir / "API_STOP.json").unlink(missing_ok=True)
 
     slots = [
         (device, per_device_index)
@@ -1253,6 +1277,9 @@ def main() -> None:
     result_lock = threading.Lock()
     with results_path.open("a", encoding="utf-8") as result_stream:
         def record_result(result: dict[str, Any]) -> None:
+            if result is None:
+                return
+            pause_on_provider_error(Path(result["workspace"]), output_dir / "API_STOP.json")
             with result_lock:
                 all_results[result["episode_key"]] = result
                 result_stream.write(json.dumps(result, ensure_ascii=False) + "\n")

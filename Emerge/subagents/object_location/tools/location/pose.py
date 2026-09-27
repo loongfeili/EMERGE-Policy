@@ -30,6 +30,8 @@ def estimate_object_locations(
     view_center_tolerance_m: float,
     ray_consensus_tolerance_m: float,
     min_consistent_views: int,
+    coordinate_frame: str = "world",
+    max_localization_distance_m: float | None = None,
 ) -> list[dict[str, Any]]:
     """Estimate object poses from standalone model-server results."""
     from Emerge.subagents.object_location.tools.location.object_pose_estimator import (
@@ -40,6 +42,12 @@ def estimate_object_locations(
     )
 
     geometry = _deserialize_geometry(geometry_payload)
+    if not coordinate_frame.strip():
+        raise ValueError("coordinate_frame must not be empty")
+    if max_localization_distance_m is not None and (
+        not np.isfinite(max_localization_distance_m) or max_localization_distance_m <= 0
+    ):
+        raise ValueError("max_localization_distance_m must be finite and positive")
     masks = _deserialize_masks(masks_payload)
     object_keys = [target["object_key"] for target in targets]
     pointclouds = merge_masked_pointclouds(
@@ -98,6 +106,10 @@ def estimate_object_locations(
                 masks=selected_masks,
                 config={"padding_pixels": bbox_padding_pixels},
             )
+            _validate_pose_geometry(
+                pose, geometry=geometry, selected_views=selected_views,
+                max_distance_m=max_localization_distance_m,
+            )
         except RuntimeError as error:
             objects.append(
                 {
@@ -113,7 +125,7 @@ def estimate_object_locations(
             {
                 **base,
                 "found": True,
-                "frame": "world",
+                "frame": coordinate_frame,
                 "position_type": "object_bbox_center",
                 "position_m": np.asarray(pose.center, dtype=float).tolist(),
                 "size_m": np.asarray(pose.extent, dtype=float).tolist(),
@@ -129,6 +141,30 @@ def estimate_object_locations(
             }
         )
     return objects
+
+
+def _validate_pose_geometry(pose, *, geometry, selected_views, max_distance_m):
+    """Reject invalid or out-of-range estimates; never clamp them into success."""
+    arrays = (pose.center, pose.extent, pose.rotation_matrix, pose.bbox_3d_corners)
+    if not all(np.isfinite(np.asarray(value)).all() for value in arrays):
+        raise RuntimeError("non_finite_pose_geometry")
+    if np.any(np.asarray(pose.extent) <= 0):
+        raise RuntimeError("invalid_pose_extent")
+    if max_distance_m is None:
+        return
+    cameras = [c for c in geometry.cameras if c.name in selected_views]
+    if not cameras:
+        raise RuntimeError("missing_selected_camera_geometry")
+    for camera in cameras:
+        transform = np.asarray(camera.T_world_camera_observed, dtype=float)
+        camera_center = transform[:3, 3]
+        # Calibrated camera coordinates use +Z forward (ROS optical convention).
+        center_camera = transform[:3, :3].T @ (np.asarray(pose.center) - camera_center)
+        if not np.isfinite(center_camera).all() or center_camera[2] <= 0:
+            raise RuntimeError("pose_behind_selected_camera")
+        distance = np.linalg.norm(np.asarray(pose.center) - camera_center)
+        if distance > max_distance_m or np.max(pose.extent) > 2 * max_distance_m:
+            raise RuntimeError("pose_outside_observation_range")
 
 
 def _deserialize_geometry(payload: dict[str, Any]) -> VGGTResult:

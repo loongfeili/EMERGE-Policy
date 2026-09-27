@@ -188,7 +188,10 @@ class RoboDojoObservationPublisher:
             # One writer for the episode: the visual monitor dedupes on the
             # manifest revision, and a fresh writer would restart it at 1 and
             # make every new scene look like the one already judged.
-            self._writer = CalibratedObservationWriter(self._workspace, views)
+            self._writer = CalibratedObservationWriter(
+                self._workspace, views, coordinate_frame="robodojo_env",
+                max_localization_distance_m=3.0,
+            )
         manifest_path = self._writer.write()
         if self._archive:
             self._archive_revision(manifest_path)
@@ -247,6 +250,8 @@ class RoboDojoObservationPublisher:
             )
 
         payload = {
+            "coordinate_frame": "robodojo_env",
+            "max_localization_distance_m": 3.0,
             "revision": self._temporal_sequence,
             "control_step": int(control_step),
             "reference_view": self._reference,

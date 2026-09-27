@@ -18,7 +18,12 @@ class CalibratedObservationWriter:
         self,
         workspace: str | Path,
         cameras: Iterable[MujocoCamera],
+        *,
+        coordinate_frame: str = "world",
+        max_localization_distance_m: float | None = None,
     ) -> None:
+        self._coordinate_frame = coordinate_frame
+        self._max_localization_distance_m = max_localization_distance_m
         self._workspace = Path(workspace).expanduser().resolve()
         self._cameras = tuple(
             camera
@@ -74,6 +79,8 @@ class CalibratedObservationWriter:
             )
 
         manifest = {
+            "coordinate_frame": self._coordinate_frame,
+            "max_localization_distance_m": self._max_localization_distance_m,
             "revision": self._revision,
             "reference_view": self._reference_view,
             "views": views,

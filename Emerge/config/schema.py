@@ -89,6 +89,7 @@ class ProviderConfig(Base):
 
     api_key: str = ""
     api_base: str | None = None
+    api_base_fallbacks: list[str] = Field(default_factory=list)
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
 
 

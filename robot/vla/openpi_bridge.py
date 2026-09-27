@@ -53,6 +53,14 @@ class Pi05Client:
         self._client: Any | None = None
         self.last_error: str | None = None
 
+    def begin_episode(self) -> None:
+        """Clear the previous episode's error latch without dropping a healthy connection.
+
+        Errors remain latched across successful retries within an episode so the
+        evaluator can account for that episode's infrastructure failure.
+        """
+        self.last_error = None
+
     @property
     def host(self) -> str:
         return self._host

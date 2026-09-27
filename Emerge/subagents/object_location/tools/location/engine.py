@@ -168,6 +168,8 @@ class LocationEngine:
             view_center_tolerance_m=self._view_center_tolerance_m,
             ray_consensus_tolerance_m=self._ray_consensus_tolerance_m,
             min_consistent_views=self._min_consistent_views,
+            coordinate_frame=self._store.current().coordinate_frame,
+            max_localization_distance_m=self._store.current().max_localization_distance_m,
         )
         for result, selection in zip(objects, selections, strict=True):
             result["candidate_id"] = selection["candidate_id"]
@@ -182,6 +184,7 @@ class LocationEngine:
         geometry = self._segmentation.geometry
         return {
             "reference_view": geometry["reference_view"],
+            "coordinate_frame": self._store.current().coordinate_frame,
             "objects": objects,
             "geometry_alignment": geometry["alignment"],
         }

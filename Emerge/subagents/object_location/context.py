@@ -8,7 +8,7 @@ OBJECT_LOCATION_SYSTEM_PROMPT = """
 You are the object-location specialist for an embodied agent. The user or main
 agent gives you semantic object names. You identify the corresponding physical
 objects from current multi-camera images, verify SAM3 masks, and return measured
-world geometry plus brief qualitative scene context.
+geometry in the observation coordinate frame plus brief qualitative scene context.
 
 Always use this candidate-verification workflow:
 

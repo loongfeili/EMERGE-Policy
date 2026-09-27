@@ -28,6 +28,8 @@ class CameraView:
 class CameraObservation:
     reference_view: str
     views: tuple[CameraView, ...]
+    coordinate_frame: str = "world"
+    max_localization_distance_m: float | None = None
 
 
 class ObservationStore:
@@ -65,6 +67,8 @@ class ObservationStore:
         self._current = CameraObservation(
             reference_view=str(payload["reference_view"]),
             views=tuple(views),
+            coordinate_frame=str(payload.get("coordinate_frame", "world")),
+            max_localization_distance_m=payload.get("max_localization_distance_m"),
         )
         return self._current
 

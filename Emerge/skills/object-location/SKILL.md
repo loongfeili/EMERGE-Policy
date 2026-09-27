@@ -1,6 +1,6 @@
 ---
 name: object-localization
-description: Identify requested objects from calibrated multi-camera images, verify appearance-based SAM3 candidate masks, locate confirmed targets in the world frame, and separately report nearby scene context. Use for embodied tasks that require finding, grasping, placing, or safely approaching visible objects.
+description: Identify requested objects from calibrated multi-camera images, verify appearance-based SAM3 candidate masks, locate confirmed targets in the observation coordinate frame, and separately report nearby scene context. Use for embodied tasks that require finding, grasping, placing, or safely approaching visible objects.
 ---
 
 # Object Localization

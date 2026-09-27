@@ -4,13 +4,18 @@ import json
 import os
 from typing import Any
 import httpx
+from loguru import logger
 from Emerge.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from Emerge.providers.openai_codex_provider import _convert_messages, _convert_tools
 
 class ResponsesProvider(LLMProvider):
-    def __init__(self, api_key: str, api_base: str, default_model: str):
+    def __init__(self, api_key: str, api_base: str, default_model: str,
+                 api_base_fallbacks: list[str] | None = None):
         super().__init__(api_key, api_base)
         self.default_model = default_model
+        # Only explicitly configured routes receive credentials; never infer a host.
+        self._endpoints = list(dict.fromkeys([api_base, *(api_base_fallbacks or [])]))
+        self._preferred_endpoint = 0
         self._client = httpx.AsyncClient(trust_env=False, proxy=os.environ.get("EMERGE_RESPONSES_PROXY") or os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY") or None, timeout=httpx.Timeout(180, connect=15))
 
     async def aclose(self):
@@ -37,15 +42,28 @@ class ResponsesProvider(LLMProvider):
             if isinstance(choice, dict) and choice.get('type') == 'function':
                 choice = {'type': 'function', 'name': choice.get('function', {}).get('name', choice.get('name'))}
             body['tool_choice'] = choice
-        try:
-            async with self._client.stream('POST', self.api_base,
-                    headers={'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}, json=body) as response:
-                if response.is_error:
-                    detail = (await response.aread()).decode("utf-8", "replace")[:1200]
-                    raise RuntimeError(f"HTTP {response.status_code}: {detail}")
-                return await self._consume(response)
-        except Exception as exc:
-            return LLMResponse(content=f'Responses API error: {type(exc).__name__}: {exc}'.replace(self.api_key, '[redacted]'), finish_reason='error')
+        from Emerge.providers.streaming import text_sink
+        order = [(self._preferred_endpoint + offset) % len(self._endpoints)
+                 for offset in range(len(self._endpoints))]
+        for attempt, index in enumerate(order):
+            retryable = False
+            try:
+                async with self._client.stream('POST', self._endpoints[index],
+                        headers={'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}, json=body) as response:
+                    if response.is_error:
+                        retryable = response.status_code in {500, 502, 503, 504, 520, 521, 522, 524}
+                        detail = (await response.aread()).decode("utf-8", "replace")[:1200]
+                        raise RuntimeError(f"HTTP {response.status_code}: {detail}")
+                    result = await self._consume(response)
+                    self._preferred_endpoint = index
+                    return result
+            except Exception as exc:
+                sink = text_sink.get()
+                can_switch = (retryable or isinstance(exc, httpx.TransportError)) and not (sink and sink.delivered)
+                if can_switch and attempt + 1 < len(order):
+                    logger.warning("Responses transport failure; trying configured fallback route (same model)")
+                    continue
+                return LLMResponse(content=f'Responses API error: {type(exc).__name__}: {exc}'.replace(self.api_key, '[redacted]'), finish_reason='error')
 
     async def _consume(self, response):
         from Emerge.providers.openai_codex_provider import _iter_sse

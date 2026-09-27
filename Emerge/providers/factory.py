@@ -32,8 +32,10 @@ def create_provider(
         if (config.get_api_base(selected_model) or "").rstrip("/").endswith("/responses"):
             from Emerge.providers.responses_provider import ResponsesProvider
             provider_class = ResponsesProvider
+            endpoint_options = {"api_base_fallbacks": provider_config.api_base_fallbacks}
         else:
             provider_class = CustomProvider
+            endpoint_options = {}
         provider = provider_class(
             api_key=(provider_config.api_key or "no-key"),
             api_base=(
@@ -41,6 +43,7 @@ def create_provider(
                 or "http://localhost:8000/v1"
             ),
             default_model=selected_model,
+            **endpoint_options,
         )
     elif provider_name == "azure_openai":
         from Emerge.providers.azure_openai_provider import (

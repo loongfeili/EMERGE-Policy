@@ -165,6 +165,8 @@ from utils.load_file import load_yaml
 from utils.pipeline_utils import process_config, process_randomization
 
 from robot.drivers.robodojo_driver import RoboDojoDriver
+from robot.robodojo_simulation.agent_workspace import install_agent_skills
+from robot.robodojo_simulation.evaluation_health import pause_on_provider_error, worker_stop_file
 from robot.robodojo_simulation.controller_loop import watch_driver_loop
 from robot.mujoco_simulation.scene_io import (
     default_robot_state_doc,
@@ -303,7 +305,7 @@ def _prepare_workspace(path: Path) -> None:
     memory_template = template_root / "memory" / "MEMORY.md"
     if memory_template.exists() and not (memory_dir / "MEMORY.md").exists():
         shutil.copy2(memory_template, memory_dir / "MEMORY.md")
-    (path / "skills").mkdir(exist_ok=True)
+    install_agent_skills(path, EMERGE_ROOT / "Emerge" / "skills")
     environment = default_robot_state_doc()
     environment["task"] = {
         "benchmark": "RoboDojo",
@@ -560,6 +562,7 @@ def _start_agent_supervisor(
                 process = subprocess.Popen(
                     command,
                     cwd=EMERGE_ROOT,
+                    env={**os.environ, "EMERGE_POLICY_BACKEND": "vla"},
                     stdout=agent_log,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -642,8 +645,12 @@ def _run_persistent_batch() -> None:
             SIMULATION_APP,
         )
         for episode_index, episode in enumerate(episodes):
+            stop_file = worker_stop_file()
+            if stop_file is not None and stop_file.exists():
+                break
             ARGS.layout_id = int(episode["layout_id"])
             ARGS.workspace = str(episode["workspace"])
+            policy_client.begin_episode()
             workspace = _workspace()
             _prepare_workspace(workspace)
             status_path = workspace / "episode_status.json"
@@ -802,6 +809,8 @@ def _run_persistent_batch() -> None:
                             "batch_episode_index": episode_index,
                         },
                     )
+                    if stop_file is not None:
+                        pause_on_provider_error(workspace, stop_file)
                 except BaseException as exc:
                     verdict_ready.set()
                     process = supervisor_state.get("process")

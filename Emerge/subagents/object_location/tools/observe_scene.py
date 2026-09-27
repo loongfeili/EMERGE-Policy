@@ -43,6 +43,7 @@ class ObserveSceneTool(Tool):
             )
         summary = {
             "reference_view": observation.reference_view,
+            "coordinate_frame": observation.coordinate_frame,
             "views": [view.name for view in observation.views],
         }
         return SubagentToolResult(
