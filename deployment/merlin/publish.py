@@ -95,6 +95,8 @@ def main():
               "attachments": attachments, "policy_seed": 0, "image_vid": "d8h852v1enldjpkjjr7g"}
     for name, nodes, gpus, workers, tasks, layouts, count in [
         ("verify", 2, 1, 1, "stack_bowls,build_tower", "0,1", 4),
+        ("full4w1", 1, 4, 1, "all", "native", 2100),
+        ("full8w1", 1, 8, 1, "all", "native", 2100),
         ("full8", 1, 8, 2, "all", "native", 2100),
         ("full16", 2, 8, 2, "all", "native", 2100),
         ("full32", 4, 8, 2, "all", "native", 2100),

@@ -107,12 +107,16 @@ r5实测：两个L20节点均从封存缓存恢复并通过完整54配置/2100�
 |配置|节点×每节点L20|每卡仿真worker|总worker|范围|
 |---|---:|---:|---:|---|
 |verify.json|2×1|1|2|4个工程验证episode|
+|full4w1.json|1×4|1|4|54个任务配置（含变体）、2100原生布局、seed0|
+|full8w1.json|1×8|1|8|同上|
 |full8.json|1×8|2|16|54个任务配置（含变体）、2100原生布局、seed0|
 |full16.json|2×8|2|32|同上|
 |full32.json|4×8|2|64|同上|
 |full64.json|8×8|2|128|同上|
 
 完整评测 `tasks=all, layouts=native`，任务清单在 `configs/robodojo_tasks_arx_x5_seed0.txt`。按全量episode索引对node数取模分片，不能每节点各跑一次完整集合。默认主Agent40轮，官方每任务仿真上限不变。保持内置skill可读，RoboDojo只开放支持的工具，不调用WAM。修改模型、提示、预算、几何阈值均用新run标识。
+
+API 网关可能先于 GPU 达到并发上限。2026-09-28 的 seed0 r1 在32个仿真worker下出现 `gateway_concurrency_limit`，已停止并保留诊断。`full4w1.json`、`full8w1.json` 仅降低同时运行的episode数，仍覆盖全部2100条；上线前必须实测 API 并发，并检查正式轨迹是否出现基础设施错误。
 
 54个配置由42个基础任务和12个`_random`变体组成，合计2100个seed0布局。官方汇总将变体合并回42个基础任务，再按五个能力维度汇总；54个配置和42个基础任务是不同统计口径。
 
