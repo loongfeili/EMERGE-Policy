@@ -13,6 +13,7 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 .venv/bin/python "$cache/git_checkout.py" "$cache/source-lock.json" --verify
 uv pip freeze --python .venv/bin/python > "$setup/agent-packages.txt"
 uv pip freeze --python /home/tiger/RoboDojo/.venv/bin/python > "$setup/simulator-packages.txt"
+.venv/bin/python "$cache/probe-inventory.py"
 .venv/bin/python "$cache/probe-api.py" > "$setup/api-probe.json"
 .venv/bin/python -c 'import json; d=json.load(open("/home/tiger/robodojo-setup/api-probe.json")); assert d["passed"] == 1, d'
 POLICY_URL=$(python3 -c "import json;print(json.load(open(__import__('os').environ['EMERGE_SERVICES_MANIFEST']))['policy_urls'][0])")

@@ -24,6 +24,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(cfg["agents"]["defaults"]["model"], "gpt-6-astra")
         self.assertEqual(cfg["providers"]["custom"]["apiBase"], "https://edge.lingsuan.org/v1/responses")
         self.assertNotIn("apiBaseFallbacks", cfg["providers"]["custom"])
+        self.assertEqual(cfg["visual_monitor"]["verificationTimeoutSeconds"], 120)
 
     def test_git_fetch_preserves_exact_ancestor_and_rejects_dirty_source(self):
         checkout = module("git_checkout")
@@ -56,7 +57,7 @@ class DeploymentTests(unittest.TestCase):
         import hashlib
         with tempfile.TemporaryDirectory() as directory:
             release = Path(directory)
-            cfg = {"kind": "eval", "run_id": "test-run", "release_mount": "/mnt/hdfs/cache/test",
+            cfg = {"kind": "eval", "run_id": "test-run", "image_vid": "test-image", "release_mount": "/mnt/hdfs/cache/test",
                    "resource_config": {}, "attachments": [], "baseline_job": "example"}
             (release / "verify.json").write_text(json.dumps(cfg))
             for name in ["entrypoint.sh", "stage-release.py"]:
@@ -64,7 +65,7 @@ class DeploymentTests(unittest.TestCase):
             (release / "release.json").write_text(json.dumps({"files": {
                 p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in release.iterdir()
             }}))
-            base = {"job_config": {"job_template_config": {"env_map": {"OLD_API_KEY": "never-inherit", "ARNOLD_HDFS_NATIVE": "1"}}}}
+            base = {"job_config": {"job_template_config": {"image_meta": {"image_vid": "test-image"}, "env_map": {"OLD_API_KEY": "never-inherit", "ARNOLD_HDFS_NATIVE": "1"}}}}
             request = launch.make_request(base, release, "verify.json", {"EMERGE_API_KEY": "new-test-placeholder"})
             template = request["overrides"]["job_config"]["job_template_config"]
             self.assertNotIn("OLD_API_KEY", template["env_map"])

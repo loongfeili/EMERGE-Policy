@@ -39,6 +39,8 @@ def make_request(base, release, config_name, env):
         if Path(name).name != name or hashlib.sha256((release / name).read_bytes()).hexdigest() != digest:
             raise ValueError("Release integrity failure: " + name)
     template = base["job_config"]["job_template_config"]
+    if template.get("image_meta", {}).get("image_vid") != cfg["image_vid"]:
+        raise ValueError("Baseline image differs from the sealed runtime configuration")
     # Explicitly reconstruct variables; do not inherit credentials from another trial.
     variables = {k: v for k, v in template.get("env_map", {}).items()
                  if k.startswith(("ARNOLD_", "HDFS_", "CPP_HDFS_", "CRS_", "MARIANA_", "CUDA_", "TORCH_", "PYTORCH_", "NCCL_"))}
@@ -46,8 +48,10 @@ def make_request(base, release, config_name, env):
     variables.update({"EMERGE_RELEASE": pod_release, "EMERGE_CONFIG": pod_release + "/" + config_name,
                       "EMERGE_MANIFEST_SHA256": hashlib.sha256((release / "release.json").read_bytes()).hexdigest(),
                       "EMERGE_STAGE_SHA256": release_manifest["files"]["stage-release.py"],
-                      "EMERGE_MODEL": "gpt-6-astra", "EMERGE_API_BASE": "https://edge.lingsuan.org"})
+                      "EMERGE_MODEL": "gpt-6-astra", "EMERGE_API_BASE": "https://edge.lingsuan.org", "ENABLE_SSH": "1"})
     for key in ("EMERGE_API_KEY", "EMERGE_RESPONSES_PROXY", "EMERGE_ASSET_PROXY", "VSCODE_SSH_KEY"):
+        if cfg["kind"] == "infer" and key in ("EMERGE_API_KEY", "EMERGE_RESPONSES_PROXY"):
+            continue
         if env.get(key):
             variables[key] = env[key]
     if cfg["kind"] == "eval" and not variables.get("EMERGE_API_KEY"):

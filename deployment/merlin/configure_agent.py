@@ -18,7 +18,7 @@ def make_config(env):
             "maxToolIterations": int(env.get("EMERGE_MAX_ITERATIONS", "40")),
         }},
         "providers": {"custom": {"apiBase": base, "apiKey": key}},
-        "visualMonitor": {"verificationTimeoutSeconds": 120},
+        "visual_monitor": {"verificationTimeoutSeconds": 120},
     }
 
 

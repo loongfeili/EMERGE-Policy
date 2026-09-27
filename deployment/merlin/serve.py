@@ -72,6 +72,12 @@ def main():
             if any(p.poll() is not None for p in processes):
                 raise RuntimeError("A model service exited")
             atomic(own_manifest, {**pools, "rank": rank, "emerge_commit": commit, "updated_at": time.time(), "state": "healthy"})
+            devices = subprocess.check_output(["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"], text=True)
+            atomic(registry / f"node-{rank:02d}-gpu.json", {"updated_at": time.time(), "columns": ["index", "name", "utilization_percent", "memory_used_mib", "memory_total_mib"], "rows": [line.split(", ") for line in devices.splitlines()]})
+            for path in setup.glob("*.log"):
+                with path.open("rb") as stream:
+                    stream.seek(max(0, path.stat().st_size - 32768))
+                    (registry / f"node-{rank:02d}-{path.stem}-tail.log").write_bytes(stream.read())
             if rank == 0:
                 try:
                     nodes = [json.loads((registry / f"node-{i:02d}.json").read_text()) for i in range(cfg["nodes"])]

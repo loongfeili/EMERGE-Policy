@@ -21,6 +21,8 @@
 
 缓存下 `assets/assets.tar.zst` 是约36 GiB的资产；`runtime/` 是环境、解释器、图形兼容层和依赖源码；`models/manifest.json` 固定π0.5/VGGT/SAM权重。资产解压到 `/home/tiger/robodojo-data/Assets`，RoboDojo/Assets 指向它；仿真不直接从HDFS逐个读取USD。依赖源码快照也有SHA锁定，与两个主仓库Git版本共同组成运行版本。
 
+基础镜像固定为 `d8h852v1enldjpkjjr7g`；提交时校验baseline返回的镜像VID，不能悄悄更换镜像继续使用旧运行时。
+
 评测基线使用 RoboDojo `b08b49c081953bb3302d079a383c9e059f952f0d`。这与此前r11冻结环境逐文件一致。本地RoboDojo可能有其他开发修改；不使用它们覆盖官方评测环境。EMERGE `robodojo` 分支从已验证评测基线9bd1821建立，保留评测修复，未混入main上的后续场景切换/服务重构。
 
 ## 发布与提交
@@ -67,7 +69,7 @@ python deployment/merlin/launch.py \
 |配置|节点×每节点L20|每卡仿真worker|总worker|范围|
 |---|---:|---:|---:|---|
 |verify.json|2×1|1|2|4个工程验证episode|
-|full8.json|1×8|2|16|42任务、2100原生布局、seed0|
+|full8.json|1×8|2|16|54个任务配置（含变体）、2100原生布局、seed0|
 |full32.json|4×8|2|64|同上|
 |full64.json|8×8|2|128|同上|
 
@@ -81,7 +83,7 @@ python deployment/merlin/launch.py \
 
 - `node-NN/deployment.json`：Git版本、配置、服务地址及命令，不含API密钥。
 - `node-NN/{api,policy,perception}-probe.json`和包清单：预检证据。
-- `node-NN/workspaces/...`及视频目录：按评测器manifest定位每条轨迹，勿猜文件名。
+- `node-NN/episodes/.../workspace`及视频目录：按评测器manifest定位每条轨迹，勿猜文件名。
 - `node-NN/runner-exit.json`引用不可变 `results-final-<uuid>.jsonl` 及SHA，优先读取此快照。
 - `progress.json`是动态视图，HDFS FUSE可能短暂缓存旧值；`final-progress.json`和`final-official-summary.json`用于终态检查。
 - `STOP.json`表示共享停止原因；连续基础设施错误、API不可用或共享存储故障会触发停止。
@@ -100,3 +102,14 @@ python -m unittest discover -s deployment/merlin -p 'test*.py' -v
 ```
 
 前者覆盖评测隔离、API恢复、终止分类、轨迹同步等；后者覆盖固定Git版本、拒绝脏源码、env_map注入/不继承旧密钥、发布物篡改和扩容资源形状。单元测试不替代Merlin冷启动和真实轨迹验收。
+
+终态验收命令（在有ffprobe的开发机执行）：
+
+```bash
+python deployment/merlin/verify_run.py \
+  --release /mnt/hdfs/__MERLIN_USER_DIR__/emerge_robodojo_20260925/releases/<release-id> \
+  --run-dir /mnt/hdfs/_BYTE_DATA_SEED_/ssd_hldy/user/lilongfei.xjgm/emerge_merlin/<release-id>/runs/<run-id> \
+  --config verify.json --output /tmp/<run-id>-verification.json
+```
+
+推理服务目录的 `node-NN-gpu.json` 每10秒更新实测GPU型号、利用率与显存，服务日志尾部也同步至HDFS。它是当前负载快照；评估吞吐须结合客户端实际RPC延迟和完成速度。API密钥仅注入评测Pod，推理Pod不需要此密钥。

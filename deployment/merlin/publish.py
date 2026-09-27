@@ -72,6 +72,10 @@ def main():
     }
     for dependency in ['openpi','sam3','vggt']:
         cache_roles['runtime/'+dependency+'-source.tar']=['eval','infer']
+    for path in (args.cache/'runtime').glob('nvidia-driver-*'):
+        if path.is_file():cache_roles['runtime/'+path.name]=['eval']
+    if (args.cache/'runtime/inference-v1/manifest.json').exists():
+        cache_roles['runtime/inference-v1/manifest.json']=['infer']
     # Large archives already have recorded SHA values; each worker checks their bytes.
     known={x['file']:x['sha256'] for x in json.loads((args.cache/'archive-recheck-20260926.json').read_text())}
     cache_lock={name:{'sha256': known[name] if name in known else sha(args.cache/name), 'roles':roles} for name,roles in cache_roles.items()}
@@ -88,7 +92,7 @@ def main():
     output = "/mnt/hdfs/emerge_output/emerge_merlin/" + args.release_id
     shared = {"release": args.release_id, "release_mount": "/mnt/hdfs/emerge_cache/releases/" + args.release_id,
               "result_root": output + "/runs", "services_manifest": output + "/services/pool.json",
-              "attachments": attachments, "policy_seed": 0}
+              "attachments": attachments, "policy_seed": 0, "image_vid": "d8h852v1enldjpkjjr7g"}
     for name, nodes, gpus, workers, tasks, layouts, count in [
         ("verify", 2, 1, 1, "stack_bowls,build_tower", "0,1", 4),
         ("full8", 1, 8, 2, "all", "native", 2100),
