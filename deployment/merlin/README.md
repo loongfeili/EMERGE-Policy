@@ -2,7 +2,23 @@
 
 本目录是部署入口。算法代码以 `https://github.com/loongfeili/EMERGE-Policy` 的 `robodojo` 分支为发布源；环境以 `https://github.com/loongfeili/RoboDojo` 为源。每次发布固定完整 commit，每个 Pod 都从 GitHub fetch 并 checkout 该 commit（隔离全局Git配置，HTTP/1.1传输，最多5次有界重试）；不把未提交补丁叠在部署源码上。
 
-当前工程流程正在做首次独立验证，验证结果和示例 trial 将在验证完成后写入本文。不要将历史 r11 的“曾经运行”视作新流程已通过。
+本流程已完成独立冷启动验收：2节点×1 L20、4条正式episode、0基础设施错误，两节点退出码0，最终覆盖完整且无重复；官方判分、轨迹与12路视频完整解码一致。该验证用于确认工程链路，不能代表全量benchmark或32/64卡吞吐。
+
+已验证发布为 `merlin-v1-20260928-r5`，运行代码固定 `9c96284a27f8e445688694dd955024436eeb80a5`，发布清单SHA256为 `1b31067b39fdf13f5859d7ecd080c3c9355bb3ee9b1d2817ecc151a83d7cf2ab`。最终收尾提交仅更新本文，未改变运行代码和封存release；release内README保留发布时快照，以分支本文及下述HDFS RUNBOOK为最终交接文档。
+
+- [L20验证job](https://seed.bytedance.net/development/instance/jobs/99402708e9af4f6d?trialId=422838308)：trial `422838308`，平台终态 `done`，两个Pod退出码0。
+- [推理job](https://seed.bytedance.net/development/instance/jobs/a11aeaf35a66d443?trialId=422837793)：trial `422837793`，名称 `geometry_seg_infer`，验收后主动停止。
+- 验收及流程目录：`/mnt/hdfs/__MERLIN_USER_DIR__/emerge_robodojo_20260925/diagnostics/merlin-standard-20260928-r5/`，包含 `RUNBOOK.md`、`REPORT.md`、`final-verification.json` 和 `final-trace-video-audit.json`。
+- 结果路径：`<结果根>/merlin-v1-20260928-r5/runs/merlin-v1-20260928-r5-verify-seed0/`；历史服务注册路径：`<结果根>/merlin-v1-20260928-r5/services/`。服务已停止，不能继续使用历史地址；新实验创建新release和推理任务。
+
+|工程验证episode|官方成功|官方得分|结束原因|
+|---|---|---:|---|
+|stack_bowls layout0 seed0|是|1.00|成功|
+|stack_bowls layout1 seed0|否|0.15|40轮Agent预算耗尽|
+|build_tower layout0 seed0|否|0.10|40轮Agent预算耗尽|
+|build_tower layout1 seed0|否|0.00|40轮Agent预算耗尽|
+
+实际成功1/4。四条轨迹记录到203次π推理、7条VGGT耗时记录、14条SAM耗时记录和39次视觉监控；存在内置skill读取，没有WAM调用，96个文本产物扫描未发现本次API key。54项pytest和6项部署单元测试通过；8/32/64卡L20及8卡推理配置dry-run通过，未提交全量实验。
 
 ## 固定位置与版本
 
@@ -50,6 +66,18 @@ python deployment/merlin/launch.py \
 
 确认配置后同一命令加 `--submit`。脚本使用 `job-v2 runs get-request-config`恢复完整job配置，覆盖完整env_map/资源/挂载，调用平台precheck和fork；敏感请求只短暂存于0600临时文件，随后删除。receipt只记录job链接、公开配置和变量名。receipt存在时拒绝重复提交；如停在submitting，先查平台是否已创建，不能因查询超时再提交一份。
 
+新一轮实验按这个顺序执行：发布唯一release → `infer.json` dry-run并提交 → 查询推理job与服务健康 → `verify.json` dry-run并提交 → 核验4条结果 → 按余量选择 `full8.json`、`full32.json` 或 `full64.json`。每个配置使用独立receipt；同一release的验证与全量任务复用同版本推理服务，输出到不同run目录。下面是推理提交示例，评测只需替换config和receipt：
+
+```bash
+python deployment/merlin/launch.py \
+  --release /mnt/hdfs/__MERLIN_USER_DIR__/emerge_robodojo_20260925/releases/<new-release-id> \
+  --config infer.json \
+  --env-file /home/tiger/.config/emerge-robodojo/merlin-env.json \
+  --receipt /tmp/<new-release-id>-infer-receipt.json --submit
+```
+
+已有封存运行时，不需要为每次实验重新运行 `infer-build.json`。若只重跑已有配置，先确认其run目录和receipt未被使用；已有结果的恢复遵循下文续跑约束。修改配置须在发布源中完成并创建新release，不能直接编辑已封存的JSON或脚本。
+
 模型固定为 `gpt-6-astra`，服务地址 `https://edge.lingsuan.org`，实际请求 `/v1/responses`。`EMERGE_API_KEY`只从调用者环境或私有env文件读取，主Agent、定位和验证使用同一模型默认值。`EMERGE_RESPONSES_PROXY`用于API代理；`EMERGE_ASSET_PROXY`用于GitHub/NVIDIA资产访问。公开示例不含key。用户提供的是SSH公钥，可用于 `VSCODE_SSH_KEY`，不能拿公钥充当Git私钥；当前开发机已有loongfeili的有效SSH认证。Pod读取公开fork使用HTTPS，无需分发私钥。
 
 ### 平台环境变量日志限制（实测）
@@ -72,6 +100,8 @@ python deployment/merlin/launch.py \
 
 验收必须看实际产物：两节点部署commit一致；api-probe通过；policy action shape正确；perception服务调用通过，几何质量拒绝须独立记录；4条互斥episode、0基础设施错误；每条都有episode_status、session、动作记录和视频；final快照SHA通过；最终coverage完整。任务失败/策略得分0是不同概念，不能将策略失败伪装成基础设施错误，也不能将部分得分算二元成功。
 
+r5实测：两个L20节点均从封存缓存恢复并通过完整54配置/2100布局检查，API工具调用分别4.02秒和3.24秒通过；π输出为50×14，并发4请求约0.47–0.48秒完成。推理服务实际使用4张A800-SXM4-80GB。VGGT/SAM服务请求成功，但参考场景和节点0实景存在多视角定位拒绝，节点1实景存在尺度MAD 0.271超过0.25阈值的拒绝。质量拒绝有明确结果，不绕过阈值；服务部署通过不等于几何定位可用率或算法效果通过。
+
 ## 扩容与完整标准评测
 
 |配置|节点×每节点L20|每卡仿真worker|总worker|范围|
@@ -89,7 +119,11 @@ python deployment/merlin/launch.py \
 
 ## 结果、续跑与排障
 
-每次结果在 `<结果根>/<release-id>/runs/<run-id>/`：
+每次结果在 `<结果根>/<release-id>/runs/<run-id>/`。
+
+首次启动先校验、解压较大的运行时和资产包，再执行预检；出现 `READY_FOR_FULL_EVALUATION` 前没有正式episode结果。正式轨迹在episode完成后同步到HDFS，运行中先看节点状态和 `eval-tail.log`。新文件上传期间或动态文件刷新时可能暂时读到空内容，应等待完成标志和不可变快照，不因一次空读取重启任务。
+
+当前结果写入锁内逐条同步session、图像、定位中间产物和三路视频；同节点的结果上传串行。r5节点1叠碗结束到搭塔批次开始约11分钟，间隔包括同步和仿真进程收尾，未单独拆分耗时；不能将其全部计为上传耗时。同任务的持久worker可以继续运行后续布局，跨任务切换则等待前一批次处理结束。估算全量墙钟时间时需计入同步、任务切换及冷启动，并在增加并发前测量HDFS吞吐与小文件开销。当前工程验证不构成32/64卡存储吞吐已达标的结论。
 
 - `node-NN/deployment.json`：Git版本、配置、服务地址及命令，不含API密钥。
 - `node-NN/{api,policy,perception}-probe.json`和包清单：预检证据。
@@ -122,4 +156,4 @@ python deployment/merlin/verify_run.py \
   --config verify.json --output /tmp/<run-id>-verification.json
 ```
 
-推理服务目录的 `node-NN-gpu.json` 每10秒更新实测GPU型号、利用率与显存，服务日志尾部也同步至HDFS。它是当前负载快照；评估吞吐须结合客户端实际RPC延迟和完成速度。API密钥仅注入评测Pod，推理Pod不需要此密钥。
+推理服务目录的 `node-NN-gpu.json` 每10秒更新实测GPU型号、利用率与显存，服务日志尾部也同步至HDFS。读取时检查 `updated_at`：跨挂载的FUSE缓存可能返回旧内容，时间戳明显滞后时用运行Pod或平台指标核对实时负载。评估吞吐须结合客户端实际RPC延迟和完成速度。API密钥仅注入评测Pod，推理Pod不需要此密钥。
