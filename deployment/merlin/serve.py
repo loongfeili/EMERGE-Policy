@@ -54,6 +54,7 @@ def main():
     def terminate(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, terminate)
+    published_pool = None
     try:
         while True:
             if any(p.poll() is not None for p in processes):
@@ -83,9 +84,14 @@ def main():
                     nodes = [json.loads((registry / f"node-{i:02d}.json").read_text()) for i in range(cfg["nodes"])]
                     assert all(n["state"] == "healthy" and n["emerge_commit"] == commit and time.time() - n["updated_at"] < 90 for n in nodes)
                     merged = {name: [url for n in nodes for url in n[name]] for name in pools}
-                    atomic(Path(cfg["services_manifest"]), {**merged, "emerge_commit": commit, "updated_at": time.time(), "nodes": cfg["nodes"]})
+                    # HDFS FUSE can cache a replaced file's old size. Only publish
+                    # topology changes; node manifests carry the periodic heartbeat.
+                    if merged != published_pool:
+                        atomic(Path(cfg["services_manifest"]), {**merged, "emerge_commit": commit, "updated_at": time.time(), "nodes": cfg["nodes"]})
+                        published_pool = merged
                 except (OSError, ValueError, KeyError, AssertionError):
                     Path(cfg["services_manifest"]).unlink(missing_ok=True)
+                    published_pool = None
             time.sleep(10)
     finally:
         atomic(own_manifest, {"rank": rank, "state": "stopped", "updated_at": time.time()})

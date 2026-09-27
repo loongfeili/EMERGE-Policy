@@ -66,6 +66,8 @@ python deployment/merlin/launch.py \
 
 提交推理后，等待 `services/pool.json`：每个节点发布模型地址和源码commit，节点0合并副本池。仿真Pod验证commit一致且每个endpoint实际健康后才继续。不要并行启动两份推理配置写同一release的服务目录；换配置先停止旧推理任务，保留归档。
 
+服务清单通过检查后保存为Pod本地 `/home/tiger/robodojo-setup/services.json`，后续预检和评测读取这个固定副本。共享pool仅在地址集合变化时发布；周期心跳在node清单。这样避免HDFS FUSE动态文件的大小/内容缓存不同步造成JSON解析失败。运行中的地址不热切换；服务故障按失败流程诊断后重启。
+
 `verify.json`采用2节点×1 L20，每卡1 worker，stack_bowls/build_tower各2个布局，共4条，seed0。它验证跨节点分片和共享结果，不用于判断策略总体成功率。每个Pod执行：Git拉取与校验→缓存校验/本地解压→环境变量生成私有配置→真实API工具调用→10步仿真/π推理→π并发请求→VGGT和SAM参考及实景调用→正式episode→视频/轨迹/最终结果写HDFS。
 
 验收必须看实际产物：两节点部署commit一致；api-probe通过；policy action shape正确；perception服务调用通过，几何质量拒绝须独立记录；4条互斥episode、0基础设施错误；每条都有episode_status、session、动作记录和视频；final快照SHA通过；最终coverage完整。任务失败/策略得分0是不同概念，不能将策略失败伪装成基础设施错误，也不能将部分得分算二元成功。
@@ -80,6 +82,8 @@ python deployment/merlin/launch.py \
 |full64.json|8×8|2|128|同上|
 
 完整评测 `tasks=all, layouts=native`，任务清单在 `configs/robodojo_tasks_arx_x5_seed0.txt`。按全量episode索引对node数取模分片，不能每节点各跑一次完整集合。默认主Agent40轮，官方每任务仿真上限不变。保持内置skill可读，RoboDojo只开放支持的工具，不调用WAM。修改模型、提示、预算、几何阈值均用新run标识。
+
+54个配置由42个基础任务和12个`_random`变体组成，合计2100个seed0布局。官方汇总将变体合并回42个基础任务，再按五个能力维度汇总；54个配置和42个基础任务是不同统计口径。
 
 扩容先保证资源余量，再增加评测节点。观察推理服务请求延迟/队列与GPU利用率；按实际瓶颈增加π或几何副本。当前提供的4卡分组是可复用起点，不是64/128worker吞吐已经通过的声明。增加推理节点后生成新的服务池并做实际并发预检，不仅看healthz。
 

@@ -34,7 +34,8 @@ def main():
     for spec in source_lock['repositories'].values():verify(spec,spec['destination'])
     probe={'rank':rank,'time':time.time(),'release':config['release']}
     atomic(node/'storage-check.json',probe);assert json.loads((node/'storage-check.json').read_text())==probe
-    services=json.loads(Path(config['services_manifest']).read_text())
+    services=json.loads(Path(os.environ['EMERGE_LOCAL_SERVICES_MANIFEST']).read_text())
+    assert services['emerge_commit']==source_lock['repositories']['emerge']['commit'], 'Inference source version differs'
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
     for url in services['policy_urls']+services['vggt_urls']+services['sam3_urls']:
         with opener.open(url.replace('ws://','http://')+'/healthz',timeout=5) as response:assert response.status==200

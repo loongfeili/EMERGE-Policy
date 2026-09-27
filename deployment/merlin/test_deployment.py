@@ -96,6 +96,29 @@ class DeploymentTests(unittest.TestCase):
                 checkout.fetch(Path("test-repo"), "robodojo")
             self.assertEqual(git.call_count, 5)
 
+    def test_service_snapshot_survives_a_replaced_hdfs_manifest(self):
+        discovery = module("wait-services")
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shared, local = root / "pool.json", root / "local/services.json"
+            (root / "source-lock.json").write_text(json.dumps({
+                "repositories": {"emerge": {"commit": "pinned-source"}}
+            }))
+            pool = {"emerge_commit": "pinned-source", "policy_urls": ["ws://policy"],
+                    "vggt_urls": ["ws://vggt"], "sam3_urls": ["ws://sam"]}
+            shared.write_text(json.dumps(pool) + "\x00")
+            env = {"EMERGE_SERVICES_MANIFEST": str(shared), "EMERGE_RELEASE": str(root),
+                   "EMERGE_LOCAL_SERVICES_MANIFEST": str(local)}
+            opener = SimpleNamespace(open=lambda *a, **k: nullcontext(SimpleNamespace(status=200)))
+            with patch.dict(discovery.os.environ, env), \
+                    patch.object(discovery.urllib.request, "build_opener", return_value=opener), \
+                    patch.object(discovery.time, "sleep", side_effect=lambda _: shared.write_text(json.dumps(pool))):
+                discovery.wait_for_services()
+            shared.write_text("a later incomplete HDFS read")
+            self.assertEqual(json.loads(local.read_text()), pool)
+
 
 if __name__ == "__main__":
     unittest.main()
