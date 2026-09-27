@@ -96,6 +96,7 @@ def main():
     for name, nodes, gpus, workers, tasks, layouts, count in [
         ("verify", 2, 1, 1, "stack_bowls,build_tower", "0,1", 4),
         ("full8", 1, 8, 2, "all", "native", 2100),
+        ("full16", 2, 8, 2, "all", "native", 2100),
         ("full32", 4, 8, 2, "all", "native", 2100),
         ("full64", 8, 8, 2, "all", "native", 2100),
     ]:
@@ -103,7 +104,7 @@ def main():
                "nodes": nodes, "gpus_per_node": gpus, "workers_per_device": workers, "tasks": tasks, "layouts": layouts,
                "expected_episodes": count, "resource_config": resources("eval", nodes, gpus)}
         (destination / (name + ".json")).write_text(json.dumps(cfg, indent=2))
-    for name, nodes, gpus, build in [("infer-build", 1, 4, True), ("infer", 1, 4, False), ("infer-scale8", 2, 4, False)]:
+    for name, nodes, gpus, build in [("infer-build", 1, 4, True), ("infer", 1, 4, False), ("infer8", 1, 8, False), ("infer-scale8", 2, 4, False)]:
         cfg = {**shared, "kind": "infer", "baseline_job": "14c201bfa03ae16d", "run_id": args.release_id + "-" + name,
                "nodes": nodes, "gpus_per_node": gpus, "build_inference_runtime": build,
                "inference_runtime": "/mnt/hdfs/emerge_cache/runtime/inference-v1",

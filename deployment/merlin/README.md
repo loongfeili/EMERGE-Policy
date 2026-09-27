@@ -66,7 +66,7 @@ python deployment/merlin/launch.py \
 
 确认配置后同一命令加 `--submit`。脚本使用 `job-v2 runs get-request-config`恢复完整job配置，覆盖完整env_map/资源/挂载，调用平台precheck和fork；敏感请求只短暂存于0600临时文件，随后删除。receipt只记录job链接、公开配置和变量名。receipt存在时拒绝重复提交；如停在submitting，先查平台是否已创建，不能因查询超时再提交一份。
 
-新一轮实验按这个顺序执行：发布唯一release → `infer.json` dry-run并提交 → 查询推理job与服务健康 → `verify.json` dry-run并提交 → 核验4条结果 → 按余量选择 `full8.json`、`full32.json` 或 `full64.json`。每个配置使用独立receipt；同一release的验证与全量任务复用同版本推理服务，输出到不同run目录。下面是推理提交示例，评测只需替换config和receipt：
+新一轮实验按这个顺序执行：发布唯一release → `infer.json` dry-run并提交 → 查询推理job与服务健康 → `verify.json` dry-run并提交 → 核验4条结果 → 按余量选择 `full8.json`、`full16.json`、`full32.json` 或 `full64.json`。每个配置使用独立receipt；同一release的验证与全量任务复用同版本推理服务，输出到不同run目录。下面是推理提交示例，评测只需替换config和receipt：
 
 ```bash
 python deployment/merlin/launch.py \
@@ -88,7 +88,7 @@ python deployment/merlin/launch.py \
 
 ## 推理服务与冷启动验证
 
-推理任务统一名称 `geometry_seg_infer`。默认组1894、cluster44、队列 `a100-sxm-80gb.hpccluster-ydfgrrp7ac9tiffwmqs7.ai`。每4卡为一组：π两副本、VGGT一副本、SAM一副本。`infer.json`为1节点×4卡；`infer-scale8.json`为2节点×4卡。平台实际设备名称必须记录，不能仅凭队列名断言型号。
+推理任务统一名称 `geometry_seg_infer`。默认组1894、cluster44、队列 `a100-sxm-80gb.hpccluster-ydfgrrp7ac9tiffwmqs7.ai`。每4卡为一组：π两副本、VGGT一副本、SAM一副本。`infer.json`为1节点×4卡；`infer8.json`为1节点×8卡；`infer-scale8.json`为2节点×4卡。平台实际设备名称必须记录，不能仅凭队列名断言型号。
 
 首次创建运行时用 `infer-build.json`。此配置允许安装依赖，随后将两个完整venv和包清单封存到该release结果目录的 `runtime-build/`，每个归档SHA回读校验。将这个目录的内容校验后复制到缓存 `runtime/inference-v1/`。普通 `infer.json`仅恢复这个冻结环境，不联网重新解析Python版本。运行时改变应使用新版本路径、新release；不要覆盖已封存目录。
 
@@ -108,6 +108,7 @@ r5实测：两个L20节点均从封存缓存恢复并通过完整54配置/2100�
 |---|---:|---:|---:|---|
 |verify.json|2×1|1|2|4个工程验证episode|
 |full8.json|1×8|2|16|54个任务配置（含变体）、2100原生布局、seed0|
+|full16.json|2×8|2|32|同上|
 |full32.json|4×8|2|64|同上|
 |full64.json|8×8|2|128|同上|
 
