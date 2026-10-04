@@ -17,6 +17,32 @@ def module(name):
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_verified_bundle_checks_out_without_network_and_rejects_tampering(self):
+        import hashlib
+        checkout = module("git_checkout")
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            source.mkdir()
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(source), *args], text=True).strip()
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "test@example.com")
+            git("config", "user.name", "test")
+            (source / "code.py").write_text("value = 1\n")
+            git("add", "code.py")
+            git("commit", "-qm", "source")
+            bundle = Path(directory) / "source.bundle"
+            git("bundle", "create", str(bundle), "main")
+            spec = {"url": "https://unreachable.invalid/repo.git", "branch": "main",
+                    "commit": git("rev-parse", "HEAD"), "bundle": str(bundle),
+                    "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest()}
+            destination = Path(directory) / "checkout"
+            checkout.checkout(spec, destination)
+            self.assertEqual((destination / "code.py").read_text(), "value = 1\n")
+            bundle.write_bytes(bundle.read_bytes() + b"tampered")
+            with self.assertRaisesRegex(ValueError, "integrity"):
+                checkout.checkout(spec, destination)
+
     def test_inference_replicas_use_their_own_reserved_host_ports(self):
         serve = module("serve")
         # Two four-GPU workers can share one eight-GPU host/IP.

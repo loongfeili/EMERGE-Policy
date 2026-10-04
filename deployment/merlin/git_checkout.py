@@ -1,5 +1,6 @@
-"""Fetch the declared fork revision; never overlay a source archive or dirty tree."""
+"""Fetch the declared revision from a verified bundle or the declared fork."""
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -17,10 +18,10 @@ def git(root, *args):
                                    text=True, env=environment, timeout=240).strip()
 
 
-def fetch(destination, branch):
+def fetch(destination, branch, remote="origin"):
     for attempt in range(5):
         try:
-            git(destination, "fetch", "--no-recurse-submodules", "origin", branch)
+            git(destination, "fetch", "--no-recurse-submodules", remote, branch)
             return
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             if attempt == 4:
@@ -44,7 +45,20 @@ def checkout(spec, destination):
         raise ValueError("Existing checkout belongs to a different repository")
     if git(destination, "diff", "--ignore-submodules=all") or git(destination, "diff", "--cached", "--ignore-submodules=all"):
         raise ValueError("Refusing to discard local source changes")
-    fetch(destination, spec["branch"])
+    if spec.get("bundle"):
+        bundle = Path(spec["bundle"])
+        expected = spec.get("bundle_sha256", "")
+        if not bundle.is_absolute() or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("Source bundle requires an absolute path and SHA256")
+        digest = hashlib.sha256()
+        with bundle.open("rb") as stream:
+            while chunk := stream.read(16 * 1024 * 1024):
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            raise ValueError("Source bundle integrity failure")
+        fetch(destination, spec["branch"], str(bundle))
+    else:
+        fetch(destination, spec["branch"])
     git(destination, "cat-file", "-e", revision + "^{commit}")
     git(destination, "merge-base", "--is-ancestor", revision, "FETCH_HEAD")
     git(destination, "checkout", "--detach", revision)
