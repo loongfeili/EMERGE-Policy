@@ -26,13 +26,32 @@ def create_provider(
         provider: LLMProvider = OpenAICodexProvider(
             default_model=selected_model
         )
+    elif provider_name == "responses":
+        from Emerge.providers.responses_provider import ResponsesProvider
+
+        if not provider_config or not provider_config.api_key or not provider_config.api_base:
+            raise ValueError("Responses requires api_key and api_base in providers.responses")
+        provider = ResponsesProvider(
+            api_key=provider_config.api_key,
+            api_base=provider_config.api_base,
+            default_model=selected_model,
+            api_base_fallbacks=provider_config.api_base_fallbacks,
+            extra_headers=provider_config.extra_headers,
+            reasoning_summary=provider_config.reasoning_summary,
+            trust_env=provider_config.trust_env,
+        )
     elif provider_name == "custom":
         from Emerge.providers.custom_provider import CustomProvider
 
         if (config.get_api_base(selected_model) or "").rstrip("/").endswith("/responses"):
             from Emerge.providers.responses_provider import ResponsesProvider
             provider_class = ResponsesProvider
-            endpoint_options = {"api_base_fallbacks": provider_config.api_base_fallbacks}
+            endpoint_options = {
+                "api_base_fallbacks": provider_config.api_base_fallbacks,
+                "extra_headers": provider_config.extra_headers,
+                "reasoning_summary": provider_config.reasoning_summary,
+                "trust_env": provider_config.trust_env,
+            }
         else:
             provider_class = CustomProvider
             endpoint_options = {}

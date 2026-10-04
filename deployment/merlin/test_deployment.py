@@ -69,6 +69,32 @@ class DeploymentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "modified"):
                 checkout.verify(spec, destination)
 
+    def test_aidp_responses_config_accepts_azure_key_and_reasoning_settings(self):
+        cfg = module("configure_agent").make_config({
+            "AZURE_OPENAI_API_KEY": "test-only-placeholder", "EMERGE_PROVIDER": "responses",
+            "EMERGE_API_BASE": "https://example.test/api/modelhub/online",
+            "EMERGE_REASONING_EFFORT": "high", "EMERGE_REASONING_SUMMARY": "auto",
+        })
+        self.assertEqual(cfg["agents"]["defaults"]["provider"], "responses")
+        self.assertEqual(cfg["agents"]["defaults"]["reasoningEffort"], "high")
+        self.assertEqual(cfg["providers"]["responses"], {
+            "apiBase": "https://example.test/api/modelhub/online", "apiKey": "test-only-placeholder",
+            "reasoningSummary": "auto", "trustEnv": False,
+        })
+
+    def test_private_key_overrides_obsolete_shell_alias(self):
+        launch = module("launch")
+        aliases = ("EMERGE_API_KEY", "AZURE_OPENAI_API_KEY")
+        for chosen, obsolete in (aliases, aliases[::-1]):
+            environment = launch.merge_private_environment(
+                {obsolete: "old-test-key", "EMERGE_ASSET_PROXY": "http://assets.invalid"},
+                {chosen: "new-test-key", "EMERGE_PROVIDER": "responses"},
+            )
+            self.assertNotIn(obsolete, environment)
+            self.assertEqual(environment["EMERGE_ASSET_PROXY"], "http://assets.invalid")
+            config = module("configure_agent").make_config(environment)
+            self.assertEqual(config["providers"]["responses"]["apiKey"], "new-test-key")
+
     def test_merlin_submission_uses_env_map_without_inheriting_secrets(self):
         launch = module("launch")
         import hashlib
@@ -96,6 +122,15 @@ class DeploymentTests(unittest.TestCase):
             variables = request["overrides"]["job_config"]["job_template_config"]["env_map"]
             for key, value in aidp.items():
                 self.assertEqual(variables[key], value)
+            aidp = {"AZURE_OPENAI_API_KEY": "new-test-placeholder", "EMERGE_PROVIDER": "responses",
+                    "EMERGE_API_BASE": "https://example.test/api/modelhub/online",
+                    "EMERGE_MODEL": "gpt-6-astra", "EMERGE_REASONING_EFFORT": "high",
+                    "EMERGE_REASONING_SUMMARY": "auto"}
+            request = launch.make_request(base, release, "verify.json", aidp)
+            variables = request["overrides"]["job_config"]["job_template_config"]["env_map"]
+            for key, value in aidp.items():
+                self.assertEqual(variables[key], value)
+            self.assertNotIn("EMERGE_API_KEY", variables)
             cfg["kind"] = "infer"
             (release / "verify.json").write_text(json.dumps(cfg))
             manifest = json.loads((release / "release.json").read_text())

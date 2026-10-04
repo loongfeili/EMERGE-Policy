@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import os
+import uuid
 from typing import Any
 import httpx
 from loguru import logger
@@ -10,13 +11,22 @@ from Emerge.providers.openai_codex_provider import _convert_messages, _convert_t
 
 class ResponsesProvider(LLMProvider):
     def __init__(self, api_key: str, api_base: str, default_model: str,
-                 api_base_fallbacks: list[str] | None = None):
+                 api_base_fallbacks: list[str] | None = None, *,
+                 extra_headers: dict[str, str] | None = None,
+                 reasoning_summary: str | None = None, trust_env: bool = True):
         super().__init__(api_key, api_base)
         self.default_model = default_model
+        self.extra_headers = extra_headers or {}
+        self.reasoning_summary = reasoning_summary
         # Only explicitly configured routes receive credentials; never infer a host.
-        self._endpoints = list(dict.fromkeys([api_base, *(api_base_fallbacks or [])]))
+        self._endpoints = list(dict.fromkeys(
+            base.rstrip('/') if base.rstrip('/').endswith('/responses') else base.rstrip('/') + '/responses'
+            for base in [api_base, *(api_base_fallbacks or [])]
+        ))
         self._preferred_endpoint = 0
-        self._client = httpx.AsyncClient(trust_env=False, proxy=os.environ.get("EMERGE_RESPONSES_PROXY") or os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY") or None, timeout=httpx.Timeout(180, connect=15))
+        proxy = (os.environ.get("EMERGE_RESPONSES_PROXY") or os.environ.get("https_proxy")
+                 or os.environ.get("HTTPS_PROXY") or None) if trust_env else None
+        self._client = httpx.AsyncClient(trust_env=False, proxy=proxy, timeout=httpx.Timeout(180, connect=15))
 
     async def aclose(self):
         await self._client.aclose()
@@ -34,8 +44,13 @@ class ResponsesProvider(LLMProvider):
                 item.pop('id', None)
         if instructions:
             body['instructions'] = instructions
+        reasoning = {}
         if reasoning_effort:
-            body['reasoning'] = {'effort': reasoning_effort}
+            reasoning['effort'] = reasoning_effort
+        if self.reasoning_summary:
+            reasoning['summary'] = self.reasoning_summary
+        if reasoning:
+            body['reasoning'] = reasoning
         if tools:
             body['tools'] = _convert_tools(tools)
             choice = tool_choice or 'auto'
@@ -49,7 +64,8 @@ class ResponsesProvider(LLMProvider):
             retryable = False
             try:
                 async with self._client.stream('POST', self._endpoints[index],
-                        headers={'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}, json=body) as response:
+                        headers={**self.extra_headers, 'Authorization': f'Bearer {self.api_key}',
+                                 'Content-Type': 'application/json', 'X-TT-LOGID': uuid.uuid4().hex}, json=body) as response:
                     if response.is_error:
                         retryable = response.status_code in {500, 502, 503, 504, 520, 521, 522, 524}
                         detail = (await response.aread()).decode("utf-8", "replace")[:1200]

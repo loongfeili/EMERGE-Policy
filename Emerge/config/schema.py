@@ -92,16 +92,18 @@ class ProviderConfig(Base):
     api_base: str | None = None
     api_base_fallbacks: list[str] = Field(default_factory=list)
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    reasoning_summary: Literal["auto", "concise", "detailed"] | None = None  # Responses API
     # Azure-compatible gateways may require an older API and token field.
     api_version: str = "2024-10-21"
     max_tokens_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_completion_tokens"
-    trust_env: bool = True  # Azure transport; disable asset proxies for internal gateways.
+    trust_env: bool = True  # Disable environment proxies for internal gateways.
 
 
 class ProvidersConfig(Base):
     """Configuration for LLM providers."""
 
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
+    responses: ProviderConfig = Field(default_factory=ProviderConfig)  # Explicit Responses API
     azure_openai: ProviderConfig = Field(default_factory=ProviderConfig)  # Azure OpenAI (model = deployment name)
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)

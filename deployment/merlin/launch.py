@@ -8,9 +8,22 @@ import shlex
 import subprocess
 import tempfile
 
-API_ENV_KEYS = {"EMERGE_API_KEY", "EMERGE_PROVIDER", "EMERGE_API_BASE", "EMERGE_API_VERSION",
-                "EMERGE_MAX_TOKENS_PARAMETER", "EMERGE_RESPONSES_PROXY", "EMERGE_MODEL", "EMERGE_REASONING_EFFORT"}
+API_ENV_KEYS = {"EMERGE_API_KEY", "AZURE_OPENAI_API_KEY", "EMERGE_PROVIDER", "EMERGE_API_BASE", "EMERGE_API_VERSION",
+                "EMERGE_MAX_TOKENS_PARAMETER", "EMERGE_RESPONSES_PROXY", "EMERGE_MODEL",
+                "EMERGE_REASONING_EFFORT", "EMERGE_REASONING_SUMMARY"}
 SHARED_ENV_KEYS = {"EMERGE_ASSET_PROXY", "VSCODE_SSH_KEY"}
+
+
+def merge_private_environment(environment, values):
+    result = dict(environment)
+    # A credential explicitly supplied in the private file wins over either
+    # alias exported by the caller's shell, including an obsolete API key.
+    aliases = {"EMERGE_API_KEY", "AZURE_OPENAI_API_KEY"}
+    if aliases.intersection(values):
+        for key in aliases:
+            result.pop(key, None)
+    result.update(values)
+    return result
 
 
 def cli(command, payload, *, dry_run=False):
@@ -61,8 +74,8 @@ def make_request(base, release, config_name, env):
     for key in sorted(allowed_keys):
         if env.get(key):
             variables[key] = env[key]
-    if cfg["kind"] == "eval" and not variables.get("EMERGE_API_KEY"):
-        raise ValueError("Export EMERGE_API_KEY before submission")
+    if cfg["kind"] == "eval" and not (variables.get("EMERGE_API_KEY") or variables.get("AZURE_OPENAI_API_KEY")):
+        raise ValueError("Export EMERGE_API_KEY or AZURE_OPENAI_API_KEY before submission")
     script = "entrypoint.sh" if cfg["kind"] == "eval" else "infer-entrypoint.sh"
     digest = release_manifest["files"][script]
     # Verify the fixed HDFS launcher itself before executing it.
@@ -102,7 +115,7 @@ def main():
         allowed = API_ENV_KEYS | SHARED_ENV_KEYS
         if set(values) - allowed or not all(isinstance(value, str) for value in values.values()):
             raise ValueError("Unexpected keys/types in private environment file")
-        environment.update(values)
+        environment = merge_private_environment(environment, values)
     request = make_request(base, args.release, args.config, environment)
     cli(["job-v2", "runs", "fork"], request, dry_run=True)
     safe = {"name": request["name"], "config": cfg, "environment_variable_names": sorted(request["overrides"]["job_config"]["job_template_config"]["env_map"])}

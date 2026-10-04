@@ -5,13 +5,17 @@ from pathlib import Path
 
 
 def make_config(env):
-    key = env.get("EMERGE_API_KEY", "").strip()
+    key = (env.get("EMERGE_API_KEY") or env.get("AZURE_OPENAI_API_KEY") or "").strip()
     if not key:
-        raise ValueError("Missing EMERGE_API_KEY in Merlin env_map")
+        raise ValueError("Missing EMERGE_API_KEY or AZURE_OPENAI_API_KEY in Merlin env_map")
     provider = env.get("EMERGE_PROVIDER", "custom")
-    if provider not in {"custom", "azure_openai"}:
-        raise ValueError("EMERGE_PROVIDER must be custom or azure_openai")
-    if provider == "azure_openai":
+    if provider not in {"custom", "azure_openai", "responses"}:
+        raise ValueError("EMERGE_PROVIDER must be custom, azure_openai, or responses")
+    if provider == "responses":
+        base = env.get("EMERGE_API_BASE", "https://aidp.bytedance.net/api/modelhub/online").rstrip("/")
+        options = {"apiBase": base, "apiKey": key, "trustEnv": False,
+                   "reasoningSummary": env.get("EMERGE_REASONING_SUMMARY", "auto")}
+    elif provider == "azure_openai":
         base = env.get("EMERGE_API_BASE", "https://aidp.bytedance.net/api/modelhub/online/v2/crawl").rstrip("/")
         options = {
             "apiBase": base, "apiKey": key,
@@ -30,7 +34,7 @@ def make_config(env):
             "model": env.get("EMERGE_MODEL", "gpt-6-astra"),
             "provider": provider,
             "maxToolIterations": int(env.get("EMERGE_MAX_ITERATIONS", "40")),
-            "reasoningEffort": env.get("EMERGE_REASONING_EFFORT"),
+            "reasoningEffort": env.get("EMERGE_REASONING_EFFORT", "high" if provider == "responses" else None),
         }},
         "providers": {provider: options},
         "visual_monitor": {"verificationTimeoutSeconds": 120},
