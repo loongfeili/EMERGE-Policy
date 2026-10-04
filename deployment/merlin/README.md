@@ -78,7 +78,27 @@ python deployment/merlin/launch.py \
 
 已有封存运行时，不需要为每次实验重新运行 `infer-build.json`。若只重跑已有配置，先确认其run目录和receipt未被使用；已有结果的恢复遵循下文续跑约束。修改配置须在发布源中完成并创建新release，不能直接编辑已封存的JSON或脚本。
 
-模型固定为 `gpt-6-astra`，服务地址 `https://edge.lingsuan.org`，实际请求 `/v1/responses`。`EMERGE_API_KEY`只从调用者环境或私有env文件读取，主Agent、定位和验证使用同一模型默认值。`EMERGE_RESPONSES_PROXY`用于API代理；`EMERGE_ASSET_PROXY`用于GitHub/NVIDIA资产访问。公开示例不含key。用户提供的是SSH公钥，可用于 `VSCODE_SSH_KEY`，不能拿公钥充当Git私钥；当前开发机已有loongfeili的有效SSH认证。Pod读取公开fork使用HTTPS，无需分发私钥。
+模型使用 `gpt-6-astra`，主Agent、定位和验证使用同一模型默认值。API通过私有env文件配置；2026-10-04切换到AIDP时使用：
+
+```json
+{
+  "EMERGE_PROVIDER": "azure_openai",
+  "EMERGE_API_BASE": "https://aidp.bytedance.net/api/modelhub/online/v2/crawl",
+  "EMERGE_API_VERSION": "2024-02-01",
+  "EMERGE_MAX_TOKENS_PARAMETER": "max_tokens",
+  "EMERGE_MODEL": "gpt-6-astra"
+}
+```
+
+`EMERGE_API_KEY`单独保存在同一0600私有env文件中，公开示例不含key。Azure适配器发送Chat Completions请求、`api-key`认证头及每次请求生成的`X-TT-LOGID`，使用非流式响应。AIDP走内部网络，不继承用于GitHub/NVIDIA的资产代理。主Agent、子Agent及视觉监控均通过同一provider工厂读取这些设置。
+
+2026-10-04基础连通性测试：官方Azure SDK文本请求返回2，图像请求正确识别红色测试图。该模型只支持默认温度，因此省略不受支持的temperature参数。
+
+**工具调用尚未通过，不可据此恢复EMERGE评测。** Chat Completions报错要求`reasoning_effort="none"`，但模型同时拒绝none（仅支持low/medium/high/xhigh）。标准Azure Responses路径返回404。当前配置不设置无效的none，不切换模型，也不采用文本伪造工具调用；需确认平台支持的Responses入口或工具调用配置。适配器单元测试只验证协议转换，不能替代此真实服务验收。
+
+历史release保持不变；未指定`EMERGE_PROVIDER`时仍使用旧`custom`配置及`https://edge.lingsuan.org/v1/responses`，便于复现。旧Responses链路使用`EMERGE_RESPONSES_PROXY`；`EMERGE_ASSET_PROXY`只负责GitHub/NVIDIA资产访问。API接入变更须另发release并做验证，不能据本机连通性测试宣称Merlin节点或全量评测已通过。
+
+用户提供的是SSH公钥，可用于 `VSCODE_SSH_KEY`，不能拿公钥充当Git私钥；当前开发机已有loongfeili的有效SSH认证。Pod读取公开fork使用HTTPS，无需分发私钥。
 
 ### 平台环境变量日志限制（实测）
 

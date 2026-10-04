@@ -27,6 +27,22 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("apiBaseFallbacks", cfg["providers"]["custom"])
         self.assertEqual(cfg["visual_monitor"]["verificationTimeoutSeconds"], 120)
 
+    def test_aidp_config_uses_azure_chat_without_responses_suffix(self):
+        cfg = module("configure_agent").make_config({
+            "EMERGE_API_KEY": "test-only-placeholder", "EMERGE_PROVIDER": "azure_openai",
+            "EMERGE_API_BASE": "https://example.test/api/modelhub/online/v2/crawl",
+            "EMERGE_API_VERSION": "2024-02-01", "EMERGE_MAX_TOKENS_PARAMETER": "max_tokens",
+            "EMERGE_REASONING_EFFORT": "low",
+        })
+        self.assertEqual(cfg["agents"]["defaults"]["provider"], "azure_openai")
+        self.assertEqual(cfg["agents"]["defaults"]["reasoningEffort"], "low")
+        options = cfg["providers"]["azure_openai"]
+        self.assertEqual(options["apiBase"], "https://example.test/api/modelhub/online/v2/crawl")
+        self.assertEqual(options["apiVersion"], "2024-02-01")
+        self.assertEqual(options["maxTokensParameter"], "max_tokens")
+        self.assertFalse(options["trustEnv"])
+        self.assertNotIn("custom", cfg["providers"])
+
     def test_git_fetch_preserves_exact_ancestor_and_rejects_dirty_source(self):
         checkout = module("git_checkout")
         with tempfile.TemporaryDirectory() as directory:
@@ -61,7 +77,7 @@ class DeploymentTests(unittest.TestCase):
             cfg = {"kind": "eval", "run_id": "test-run", "image_vid": "test-image", "release_mount": "/mnt/hdfs/cache/test",
                    "resource_config": {}, "attachments": [], "baseline_job": "example"}
             (release / "verify.json").write_text(json.dumps(cfg))
-            for name in ["entrypoint.sh", "stage-release.py"]:
+            for name in ["entrypoint.sh", "infer-entrypoint.sh", "stage-release.py"]:
                 (release / name).write_text("# fixed script\n")
             (release / "release.json").write_text(json.dumps({"files": {
                 p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in release.iterdir()
@@ -72,6 +88,22 @@ class DeploymentTests(unittest.TestCase):
             self.assertNotIn("OLD_API_KEY", template["env_map"])
             self.assertEqual(template["env_map"]["EMERGE_API_KEY"], "new-test-placeholder")
             self.assertNotIn("new-test-placeholder", template["entrypoint_full_script"])
+            aidp = {"EMERGE_API_KEY": "new-test-placeholder", "EMERGE_PROVIDER": "azure_openai",
+                    "EMERGE_API_BASE": "https://example.test/api/modelhub/online/v2/crawl",
+                    "EMERGE_API_VERSION": "2024-02-01", "EMERGE_MAX_TOKENS_PARAMETER": "max_tokens",
+                    "EMERGE_MODEL": "gpt-6-astra", "EMERGE_REASONING_EFFORT": "low"}
+            request = launch.make_request(base, release, "verify.json", aidp)
+            variables = request["overrides"]["job_config"]["job_template_config"]["env_map"]
+            for key, value in aidp.items():
+                self.assertEqual(variables[key], value)
+            cfg["kind"] = "infer"
+            (release / "verify.json").write_text(json.dumps(cfg))
+            manifest = json.loads((release / "release.json").read_text())
+            manifest["files"]["verify.json"] = hashlib.sha256((release / "verify.json").read_bytes()).hexdigest()
+            (release / "release.json").write_text(json.dumps(manifest))
+            request = launch.make_request(base, release, "verify.json", aidp)
+            variables = request["overrides"]["job_config"]["job_template_config"]["env_map"]
+            self.assertTrue(set(aidp).isdisjoint(variables))
             (release / "entrypoint.sh").write_text("tampered\n")
             with self.assertRaisesRegex(ValueError, "integrity"):
                 launch.make_request(base, release, "verify.json", {})

@@ -1,6 +1,7 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -27,7 +28,7 @@ class AgentDefaults(Base):
     max_tool_iterations: int = 40
     # Deprecated compatibility field: accepted from old configs but ignored at runtime.
     memory_window: int | None = Field(default=None, exclude=True)
-    reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
+    reasoning_effort: str | None = None  # none / low / medium / high, subject to model support
 
     @property
     def should_warn_deprecated_memory_window(self) -> bool:
@@ -91,6 +92,10 @@ class ProviderConfig(Base):
     api_base: str | None = None
     api_base_fallbacks: list[str] = Field(default_factory=list)
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
+    # Azure-compatible gateways may require an older API and token field.
+    api_version: str = "2024-10-21"
+    max_tokens_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_completion_tokens"
+    trust_env: bool = True  # Azure transport; disable asset proxies for internal gateways.
 
 
 class ProvidersConfig(Base):

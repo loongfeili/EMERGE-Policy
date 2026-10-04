@@ -1,10 +1,10 @@
-"""Azure OpenAI provider implementation with API version 2024-10-21."""
+"""Azure-compatible chat completions with configurable API version and token field."""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote, urlencode, urljoin
 
 import httpx
 import json_repair
@@ -16,13 +16,13 @@ _AZURE_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "n
 
 class AzureOpenAIProvider(LLMProvider):
     """
-    Azure OpenAI provider with API version 2024-10-21 compliance.
+    Azure OpenAI provider, including gateways using API version 2024-02-01.
 
     Features:
-    - Hardcoded API version 2024-10-21
+    - Defaults to API version 2024-10-21; configurable per provider
     - Uses model field as Azure deployment name in URL path
     - Uses api-key header instead of Authorization Bearer
-    - Uses max_completion_tokens instead of max_tokens
+    - Supports max_completion_tokens or max_tokens, according to configuration
     - Direct HTTP calls, bypasses LiteLLM
     """
 
@@ -31,10 +31,19 @@ class AzureOpenAIProvider(LLMProvider):
         api_key: str = "",
         api_base: str = "",
         default_model: str = "gpt-5.2-chat",
+        api_version: str = "2024-10-21",
+        max_tokens_parameter: str = "max_completion_tokens",
+        extra_headers: dict[str, str] | None = None,
+        trust_env: bool = True,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
-        self.api_version = "2024-10-21"
+        self.api_version = api_version
+        if max_tokens_parameter not in {"max_tokens", "max_completion_tokens"}:
+            raise ValueError("Unsupported Azure token limit parameter")
+        self.max_tokens_parameter = max_tokens_parameter
+        self.extra_headers = dict(extra_headers or {})
+        self.trust_env = trust_env
 
         # Validate required parameters
         if not api_key:
@@ -57,17 +66,20 @@ class AzureOpenAIProvider(LLMProvider):
 
         url = urljoin(
             base_url,
-            f"openai/deployments/{deployment_name}/chat/completions"
+            f"openai/deployments/{quote(deployment_name, safe='')}/chat/completions"
         )
-        return f"{url}?api-version={self.api_version}"
+        return f"{url}?{urlencode({'api-version': self.api_version})}"
 
     def _build_headers(self) -> dict[str, str]:
         """Build headers for Azure OpenAI API with api-key header."""
-        return {
+        headers = {
+            **self.extra_headers,
             "Content-Type": "application/json",
             "api-key": self.api_key,  # Azure OpenAI uses api-key header, not Authorization
             "x-session-affinity": uuid.uuid4().hex,  # For cache locality
         }
+        headers.setdefault("X-TT-LOGID", uuid.uuid4().hex)
+        return headers
 
     @staticmethod
     def _supports_temperature(
@@ -78,7 +90,7 @@ class AzureOpenAIProvider(LLMProvider):
         if reasoning_effort:
             return False
         name = deployment_name.lower()
-        return not any(token in name for token in ("gpt-5", "o1", "o3", "o4"))
+        return not any(token in name for token in ("gpt-5", "gpt-6", "o1", "o3", "o4"))
 
     def _prepare_request_payload(
         self,
@@ -90,13 +102,15 @@ class AzureOpenAIProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Prepare the request payload with Azure OpenAI 2024-10-21 compliance."""
+        """Prepare a non-streaming request matching the configured gateway contract."""
         payload: dict[str, Any] = {
+            "model": deployment_name,
             "messages": self._sanitize_request_messages(
                 self._sanitize_empty_content(messages),
                 _AZURE_MSG_KEYS,
             ),
-            "max_completion_tokens": max(1, max_tokens),  # Azure API 2024-10-21 uses max_completion_tokens
+            self.max_tokens_parameter: max(1, max_tokens),
+            "stream": False,
         }
 
         if self._supports_temperature(deployment_name, reasoning_effort):
@@ -128,7 +142,7 @@ class AzureOpenAIProvider(LLMProvider):
             messages: List of message dicts with 'role' and 'content'.
             tools: Optional list of tool definitions in OpenAI format.
             model: Model identifier (used as deployment name).
-            max_tokens: Maximum tokens in response (mapped to max_completion_tokens).
+            max_tokens: Response token limit, mapped to the configured token field.
             temperature: Sampling temperature.
             reasoning_effort: Optional reasoning effort parameter.
 
@@ -144,7 +158,7 @@ class AzureOpenAIProvider(LLMProvider):
         )
 
         try:
-            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
+            async with httpx.AsyncClient(timeout=60.0, verify=True, trust_env=self.trust_env) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 if response.status_code != 200:
                     return LLMResponse(

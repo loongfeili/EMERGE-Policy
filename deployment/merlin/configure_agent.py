@@ -8,16 +8,31 @@ def make_config(env):
     key = env.get("EMERGE_API_KEY", "").strip()
     if not key:
         raise ValueError("Missing EMERGE_API_KEY in Merlin env_map")
-    base = env.get("EMERGE_API_BASE", "https://edge.lingsuan.org").rstrip("/")
-    if not base.endswith("/responses"):
-        base += "/responses" if base.endswith("/v1") else "/v1/responses"
+    provider = env.get("EMERGE_PROVIDER", "custom")
+    if provider not in {"custom", "azure_openai"}:
+        raise ValueError("EMERGE_PROVIDER must be custom or azure_openai")
+    if provider == "azure_openai":
+        base = env.get("EMERGE_API_BASE", "https://aidp.bytedance.net/api/modelhub/online/v2/crawl").rstrip("/")
+        options = {
+            "apiBase": base, "apiKey": key,
+            "apiVersion": env.get("EMERGE_API_VERSION", "2024-02-01"),
+            "maxTokensParameter": env.get("EMERGE_MAX_TOKENS_PARAMETER", "max_tokens"),
+            # Asset proxies are for GitHub/NVIDIA; AIDP uses the internal network.
+            "trustEnv": False,
+        }
+    else:
+        base = env.get("EMERGE_API_BASE", "https://edge.lingsuan.org").rstrip("/")
+        if not base.endswith("/responses"):
+            base += "/responses" if base.endswith("/v1") else "/v1/responses"
+        options = {"apiBase": base, "apiKey": key}
     return {
         "agents": {"defaults": {
             "model": env.get("EMERGE_MODEL", "gpt-6-astra"),
-            "provider": "custom",
+            "provider": provider,
             "maxToolIterations": int(env.get("EMERGE_MAX_ITERATIONS", "40")),
+            "reasoningEffort": env.get("EMERGE_REASONING_EFFORT"),
         }},
-        "providers": {"custom": {"apiBase": base, "apiKey": key}},
+        "providers": {provider: options},
         "visual_monitor": {"verificationTimeoutSeconds": 120},
     }
 
@@ -32,6 +47,7 @@ if __name__ == "__main__":
     with os.fdopen(fd, "w") as stream:
         json.dump(config, stream)
     path.chmod(0o600)
+    provider = config["agents"]["defaults"]["provider"]
     print(json.dumps({"configured": True, "model": config["agents"]["defaults"]["model"],
-                      "api_base": config["providers"]["custom"]["apiBase"],
+                      "provider": provider, "api_base": config["providers"][provider]["apiBase"],
                       "credential_source": "Merlin env_map"}))

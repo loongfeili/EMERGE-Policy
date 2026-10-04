@@ -63,6 +63,10 @@ def create_provider(
             api_key=provider_config.api_key,
             api_base=provider_config.api_base,
             default_model=selected_model,
+            api_version=provider_config.api_version,
+            max_tokens_parameter=provider_config.max_tokens_parameter,
+            extra_headers=provider_config.extra_headers,
+            trust_env=provider_config.trust_env,
         )
     else:
         from Emerge.providers.litellm_provider import LiteLLMProvider
