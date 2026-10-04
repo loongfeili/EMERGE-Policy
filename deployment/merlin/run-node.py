@@ -45,6 +45,8 @@ def main():
     private.write_text(json.dumps(agent));private.chmod(0o600)
     urls=services['policy_urls'];offset=(rank*config['gpus_per_node'])%len(urls);urls=urls[offset:]+urls[:offset]
     command=[str(root/'.venv/bin/python'),'scripts/eval_robodojo_agent.py','--robodojo-root','/home/tiger/RoboDojo','--devices',','.join(map(str,range(config['gpus_per_node']))),'--workers-per-device',str(config['workers_per_device']),'--shard-index',str(rank),'--shard-count',str(config['nodes']),'--policy-server-url',','.join(urls),'--agent-config',str(private),'--agent-python',str(root/'.venv/bin/python'),'--policy-seed',str(config['policy_seed']),'--run-dir',str(run),'--tasks',config['tasks'],'--layouts',config['layouts'],'--resume']
+    if config.get('episode_timeout_s'):
+        command += ['--episode-timeout-s', str(config['episode_timeout_s'])]
     for filename in ['api-probe.json','policy-probe.json','perception-probe.json','standard-inventory.json','agent-packages.txt','simulator-packages.txt','graphics-env.sh']:
         source=Path('/home/tiger/robodojo-setup')/filename
         if source.exists():shutil.copyfile(source,node/filename)

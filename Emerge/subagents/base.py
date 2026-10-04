@@ -8,6 +8,7 @@ from loguru import logger
 
 from Emerge.base import ToolRegistry
 from Emerge.providers.base import LLMProvider
+from Emerge.providers.request_limiter import wait_for_active_time
 from Emerge.subagents.context import SubagentContextBuilder, SubagentRunContext
 from Emerge.subagents.models import (
     InputModality,
@@ -77,7 +78,7 @@ class BaseSubagent:
             return await self._run(task)
 
         try:
-            return await asyncio.wait_for(self._run(task), timeout=task.timeout)
+            return await wait_for_active_time(self._run(task), timeout=task.timeout)
         except asyncio.TimeoutError:
             return SubagentResult.failure(
                 task,

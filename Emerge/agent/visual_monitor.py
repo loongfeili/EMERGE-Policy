@@ -160,7 +160,8 @@ class VisualMonitor:
             if future.cancelled():
                 continue
             try:
-                result = await asyncio.wait_for(
+                from Emerge.providers.request_limiter import wait_for_active_time
+                result = await wait_for_active_time(
                     self._verify(task),
                     timeout=task.timeout,
                 )

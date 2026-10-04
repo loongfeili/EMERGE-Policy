@@ -32,6 +32,16 @@ def main():
     host = next(ip for ip in addresses if ":" in ip and not ip.startswith("fdbd:fdbd:"))
     pools = {name: [] for name in ("policy_urls", "vggt_urls", "sam3_urls")}
     processes = []
+    limiter_url = None
+    if cfg.get('api_limiter') and rank == 0:
+        limiter = cfg['api_limiter']
+        port = int(limiter.get('port', 8100))
+        limiter_url = f'http://[{host}]:{port}'
+        log = (setup / 'api-limiter.log').open('w')
+        processes.append(subprocess.Popen([str(root / '.venv/bin/python'), '-u',
+            str(Path(args.config).parent / 'api-limiter.py'), '--port', str(port),
+            '--rpm', str(limiter['rpm'])], stdout=log, stderr=subprocess.STDOUT))
+        log.close()
     base = {**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false", "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4", "OPENBLAS_NUM_THREADS": "4",
             "PYTHONPATH": str(root) + ":" + str(root / "third_party/openpi/src") + ":" + str(root / "third_party/openpi/packages/openpi-client/src")}
     common = ["--host", "::", "--max-batch-size", "1", "--batch-wait-ms", "0"]
@@ -60,6 +70,9 @@ def main():
             if any(p.poll() is not None for p in processes):
                 raise RuntimeError("A model service exited; see service logs")
             try:
+                if limiter_url:
+                    with opener.open(limiter_url + '/healthz', timeout=5) as response:
+                        assert response.status == 200
                 for urls in pools.values():
                     for url in urls:
                         with opener.open(url.replace("ws://", "http://") + "/healthz", timeout=5) as response:
@@ -73,6 +86,9 @@ def main():
             if any(p.poll() is not None for p in processes):
                 raise RuntimeError("A model service exited")
             atomic(own_manifest, {**pools, "rank": rank, "emerge_commit": commit, "updated_at": time.time(), "state": "healthy"})
+            if limiter_url:
+                with opener.open(limiter_url + '/healthz', timeout=5) as response:
+                    atomic(registry / 'api-quota.json', {**json.load(response), 'updated_at': time.time()})
             devices = subprocess.check_output(["nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"], text=True)
             atomic(registry / f"node-{rank:02d}-gpu.json", {"updated_at": time.time(), "columns": ["index", "name", "utilization_percent", "memory_used_mib", "memory_total_mib"], "rows": [line.split(", ") for line in devices.splitlines()]})
             for path in setup.glob("*.log"):
@@ -84,6 +100,8 @@ def main():
                     nodes = [json.loads((registry / f"node-{i:02d}.json").read_text()) for i in range(cfg["nodes"])]
                     assert all(n["state"] == "healthy" and n["emerge_commit"] == commit and time.time() - n["updated_at"] < 90 for n in nodes)
                     merged = {name: [url for n in nodes for url in n[name]] for name in pools}
+                    if limiter_url:
+                        merged['api_limiter_url'] = limiter_url
                     # HDFS FUSE can cache a replaced file's old size. Only publish
                     # topology changes; node manifests carry the periodic heartbeat.
                     if merged != published_pool:

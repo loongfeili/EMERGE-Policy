@@ -15,6 +15,11 @@ def make_config(env):
         base = env.get("EMERGE_API_BASE", "https://aidp.bytedance.net/api/modelhub/online").rstrip("/")
         options = {"apiBase": base, "apiKey": key, "trustEnv": False,
                    "reasoningSummary": env.get("EMERGE_REASONING_SUMMARY", "auto")}
+        if env.get('EMERGE_RATE_LIMIT_REQUIRED') == '1':
+            services = json.loads(Path(env['EMERGE_LOCAL_SERVICES_MANIFEST']).read_text())
+            options.update(rateLimitUrl=services['api_limiter_url'], rateLimitToken=env['EMERGE_RATE_LIMIT_TOKEN'])
+            if not options['rateLimitUrl'] or not options['rateLimitToken']:
+                raise ValueError('Shared API limiter configuration is incomplete')
     elif provider == "azure_openai":
         base = env.get("EMERGE_API_BASE", "https://aidp.bytedance.net/api/modelhub/online/v2/crawl").rstrip("/")
         options = {

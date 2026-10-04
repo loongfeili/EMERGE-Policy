@@ -11,7 +11,7 @@ import tempfile
 API_ENV_KEYS = {"EMERGE_API_KEY", "AZURE_OPENAI_API_KEY", "EMERGE_PROVIDER", "EMERGE_API_BASE", "EMERGE_API_VERSION",
                 "EMERGE_MAX_TOKENS_PARAMETER", "EMERGE_RESPONSES_PROXY", "EMERGE_MODEL",
                 "EMERGE_REASONING_EFFORT", "EMERGE_REASONING_SUMMARY"}
-SHARED_ENV_KEYS = {"EMERGE_ASSET_PROXY", "VSCODE_SSH_KEY"}
+SHARED_ENV_KEYS = {"EMERGE_ASSET_PROXY", "VSCODE_SSH_KEY", "EMERGE_RATE_LIMIT_TOKEN"}
 
 
 def merge_private_environment(environment, values):
@@ -71,6 +71,10 @@ def make_request(base, release, config_name, env):
         variables.update({"EMERGE_MODEL": env.get("EMERGE_MODEL", "gpt-6-astra"),
                           "EMERGE_PROVIDER": env.get("EMERGE_PROVIDER", "custom")})
         allowed_keys = allowed_keys | API_ENV_KEYS
+        if cfg.get('require_api_limiter'):
+            variables['EMERGE_RATE_LIMIT_REQUIRED'] = '1'
+    if (cfg.get('require_api_limiter') or cfg.get('api_limiter')) and not env.get('EMERGE_RATE_LIMIT_TOKEN'):
+        raise ValueError('Shared API limiter access token is required for this release')
     for key in sorted(allowed_keys):
         if env.get(key):
             variables[key] = env[key]

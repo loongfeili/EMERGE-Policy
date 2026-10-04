@@ -27,13 +27,13 @@ trap on_exit EXIT
 python3 "$EMERGE_RELEASE/git_checkout.py" "$EMERGE_RELEASE/source-lock.json"
 EMERGE_PHASE=bootstrap
 bash "$EMERGE_RELEASE/bootstrap-l20.sh"
-EMERGE_PHASE=credentials
-python3 "$EMERGE_RELEASE/configure_agent.py"
-unset EMERGE_API_KEY
 EMERGE_PHASE=services
 export EMERGE_LOCAL_SERVICES_MANIFEST=/home/tiger/robodojo-setup/services.json
 python3 "$EMERGE_RELEASE/wait-services.py"
 export EMERGE_SERVICES_MANIFEST="$EMERGE_LOCAL_SERVICES_MANIFEST"
+EMERGE_PHASE=credentials
+python3 "$EMERGE_RELEASE/configure_agent.py"
+unset EMERGE_API_KEY AZURE_OPENAI_API_KEY
 EMERGE_PHASE=preflight
 bash "$EMERGE_RELEASE/preflight.sh"
 EMERGE_PHASE=evaluation

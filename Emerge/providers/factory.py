@@ -39,6 +39,8 @@ def create_provider(
             extra_headers=provider_config.extra_headers,
             reasoning_summary=provider_config.reasoning_summary,
             trust_env=provider_config.trust_env,
+            rate_limit_url=provider_config.rate_limit_url,
+            rate_limit_token=provider_config.rate_limit_token,
         )
     elif provider_name == "custom":
         from Emerge.providers.custom_provider import CustomProvider
@@ -51,6 +53,8 @@ def create_provider(
                 "extra_headers": provider_config.extra_headers,
                 "reasoning_summary": provider_config.reasoning_summary,
                 "trust_env": provider_config.trust_env,
+                "rate_limit_url": provider_config.rate_limit_url,
+                "rate_limit_token": provider_config.rate_limit_token,
             }
         else:
             provider_class = CustomProvider

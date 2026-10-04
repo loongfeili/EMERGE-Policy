@@ -13,7 +13,8 @@ class ResponsesProvider(LLMProvider):
     def __init__(self, api_key: str, api_base: str, default_model: str,
                  api_base_fallbacks: list[str] | None = None, *,
                  extra_headers: dict[str, str] | None = None,
-                 reasoning_summary: str | None = None, trust_env: bool = True):
+                 reasoning_summary: str | None = None, trust_env: bool = True,
+                 rate_limit_url: str | None = None, rate_limit_token: str | None = None):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
@@ -27,9 +28,13 @@ class ResponsesProvider(LLMProvider):
         proxy = (os.environ.get("EMERGE_RESPONSES_PROXY") or os.environ.get("https_proxy")
                  or os.environ.get("HTTPS_PROXY") or None) if trust_env else None
         self._client = httpx.AsyncClient(trust_env=False, proxy=proxy, timeout=httpx.Timeout(180, connect=15))
+        from Emerge.providers.request_limiter import RequestLimiter
+        self._limiter = RequestLimiter(rate_limit_url, rate_limit_token) if rate_limit_url else None
 
     async def aclose(self):
         await self._client.aclose()
+        if self._limiter:
+            await self._limiter.aclose()
 
     def get_default_model(self):
         return self.default_model
@@ -63,10 +68,14 @@ class ResponsesProvider(LLMProvider):
         for attempt, index in enumerate(order):
             retryable = False
             try:
+                if self._limiter:
+                    await self._limiter.acquire()
                 async with self._client.stream('POST', self._endpoints[index],
                         headers={**self.extra_headers, 'Authorization': f'Bearer {self.api_key}',
                                  'Content-Type': 'application/json', 'X-TT-LOGID': uuid.uuid4().hex}, json=body) as response:
                     if response.is_error:
+                        if response.status_code == 429 and self._limiter:
+                            await self._limiter.rate_limited()
                         retryable = response.status_code in {500, 502, 503, 504, 520, 521, 522, 524}
                         detail = (await response.aread()).decode("utf-8", "replace")[:1200]
                         raise RuntimeError(f"HTTP {response.status_code}: {detail}")

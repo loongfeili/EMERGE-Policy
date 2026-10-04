@@ -27,6 +27,9 @@ def wait_for_services():
         try:
             services = json.loads(path.read_text())
             assert services["emerge_commit"] == lock["repositories"]["emerge"]["commit"], "Inference source version differs"
+            if os.environ.get('EMERGE_RATE_LIMIT_REQUIRED') == '1':
+                with opener.open(services['api_limiter_url'] + '/healthz', timeout=5) as response:
+                    assert response.status == 200
             for name in ("policy_urls", "vggt_urls", "sam3_urls"):
                 assert services[name], f"Empty service pool: {name}"
                 for url in services[name]:

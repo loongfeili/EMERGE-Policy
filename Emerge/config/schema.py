@@ -97,6 +97,8 @@ class ProviderConfig(Base):
     api_version: str = "2024-10-21"
     max_tokens_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_completion_tokens"
     trust_env: bool = True  # Disable environment proxies for internal gateways.
+    rate_limit_url: str | None = None
+    rate_limit_token: str | None = None
 
 
 class ProvidersConfig(Base):

@@ -1,5 +1,18 @@
 # Merlin 上的可扩展 RoboDojo / EMERGE 评测
 
+2026-10-04 的 AIDP Responses 扩容支持共享 API 配额协调器。推理配置可设置
+`api_limiter: {"rpm": 90, "port": 8100}`，只在该推理任务 rank 0 启动；
+评测配置设置 `require_api_limiter: true`，双方通过私有 env_map 注入同一
+`EMERGE_RATE_LIMIT_TOKEN`。它仅签发配额，不接收模型 API key、图像或提示。
+评测节点从服务清单获取 `api_limiter_url`，每次 Responses 请求（含重试）先取得配额；
+协调器故障时禁止绕过限速。429 会使所有节点暂停至少 65 秒并将速率降低 25%。
+`services/<推理组>/api-quota.json` 记录速率、排队数及限流事件。
+
+配额等待不计入子代理和视觉验证的计算超时；模型调用、工具执行仍受原有超时约束。
+评测配置可显式设置 `episode_timeout_s` 来容纳排队产生的墙钟延迟，必须在报告中记录；
+它不改变 40 轮 Agent 上限或 RoboDojo 仿真步数。64 卡限速运行使用每卡 1 worker，
+并非旧 `full64.json` 的每卡 2 worker。各子服务池合并前必须校验源码版本、副本数和健康状态。
+
 本目录是部署入口。算法代码以 `https://github.com/loongfeili/EMERGE-Policy` 的 `robodojo` 分支为发布源；环境以 `https://github.com/loongfeili/RoboDojo` 为源。每次发布固定完整 commit，每个 Pod 都从 GitHub fetch 并 checkout 该 commit（隔离全局Git配置，HTTP/1.1传输，最多5次有界重试）；不把未提交补丁叠在部署源码上。
 
 本流程已完成独立冷启动验收：2节点×1 L20、4条正式episode、0基础设施错误，两节点退出码0，最终覆盖完整且无重复；官方判分、轨迹与12路视频完整解码一致。该验证用于确认工程链路，不能代表全量benchmark或32/64卡吞吐。
