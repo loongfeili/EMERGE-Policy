@@ -195,3 +195,5 @@ python deployment/merlin/verify_run.py \
 ```
 
 推理服务目录的 `node-NN-gpu.json` 每10秒更新实测GPU型号、利用率与显存，服务日志尾部也同步至HDFS。读取时检查 `updated_at`：跨挂载的FUSE缓存可能返回旧内容，时间戳明显滞后时用运行Pod或平台指标核对实时负载。评估吞吐须结合客户端实际RPC延迟和完成速度。API密钥仅注入评测Pod，推理Pod不需要此密钥。
+
+服务端口从各 worker 的 `ARNOLD_WORKER_<rank>_PORT` 分配列表读取，模型各占一个，rank 0 的 API 限速器另占一个。配置 `ports` 必须覆盖这些服务；缺失、重复或不足时启动直接失败。多个半机 worker 可能共享宿主机网络，不能固定使用 8000–8003 或 8100，也不能根据端口连续性推导地址。客户端统一读取发布的服务 manifest。

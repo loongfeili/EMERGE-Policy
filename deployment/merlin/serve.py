@@ -15,6 +15,21 @@ def atomic(path, value):
     os.replace(temporary, path)
 
 
+def allocated_ports(environment, rank, gpu_count, *, with_limiter=False):
+    """Use this worker's reserved ports even when pods share a host network."""
+    key = f"ARNOLD_WORKER_{rank}_PORT"
+    raw = environment.get(key, "")
+    try:
+        ports = [int(value.strip()) for value in raw.split(",")]
+    except ValueError as error:
+        raise ValueError(f"Missing or invalid platform port allocation: {key}") from error
+    required = gpu_count + int(with_limiter)
+    if (len(ports) < required or len(set(ports)) != len(ports)
+            or any(port < 1 or port > 65535 for port in ports)):
+        raise ValueError(f"Invalid platform port allocation: {key}; need {required} unique ports")
+    return ports[:gpu_count], ports[gpu_count] if with_limiter else None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -22,6 +37,10 @@ def main():
     cfg = json.loads(Path(args.config).read_text())
     rank = int(os.environ["ARNOLD_ID"])
     assert 0 <= rank < cfg["nodes"] and cfg["gpus_per_node"] % 4 == 0
+    model_ports, limiter_port = allocated_ports(
+        os.environ, rank, cfg["gpus_per_node"],
+        with_limiter=bool(cfg.get("api_limiter")) and rank == 0,
+    )
     root = Path("/home/tiger/EMERGE-Policy")
     setup = Path("/home/tiger/emerge-setup")
     registry = Path(cfg["services_manifest"]).parent
@@ -35,7 +54,7 @@ def main():
     limiter_url = None
     if cfg.get('api_limiter') and rank == 0:
         limiter = cfg['api_limiter']
-        port = int(limiter.get('port', 8100))
+        port = limiter_port
         limiter_url = f'http://[{host}]:{port}'
         log = (setup / 'api-limiter.log').open('w')
         processes.append(subprocess.Popen([str(root / '.venv/bin/python'), '-u',
@@ -53,7 +72,7 @@ def main():
     ]
     for gpu in range(cfg["gpus_per_node"]):
         name, pool, python, module, arguments = specs[gpu % 4]
-        port = 8000 + gpu
+        port = model_ports[gpu]
         log = (setup / f"{name}-{gpu}.log").open("w")
         processes.append(subprocess.Popen([str(root / python), "-u", "-m", module, *arguments, "--port", str(port), *common], cwd=root, env={**base, "CUDA_VISIBLE_DEVICES": str(gpu)}, stdout=log, stderr=subprocess.STDOUT))
         log.close()

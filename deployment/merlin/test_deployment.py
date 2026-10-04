@@ -17,6 +17,26 @@ def module(name):
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_inference_replicas_use_their_own_reserved_host_ports(self):
+        serve = module("serve")
+        # Two four-GPU workers can share one eight-GPU host/IP.
+        environment = {"ARNOLD_WORKER_0_PORT": "9513,9236,9858,9906,10409",
+                       "ARNOLD_WORKER_1_PORT": "11071,10579,9368,9285,10118"}
+        models0, limiter = serve.allocated_ports(environment, 0, 4, with_limiter=True)
+        models1, unused = serve.allocated_ports(environment, 1, 4)
+        self.assertEqual(models0, [9513,9236,9858,9906])
+        self.assertEqual(limiter, 10409)
+        self.assertEqual(models1, [11071,10579,9368,9285])
+        self.assertIsNone(unused)
+        self.assertFalse(set(models0 + [limiter]) & set(models1))
+
+    def test_inference_rejects_missing_or_unsafe_port_allocations(self):
+        serve = module("serve")
+        for value in ["", "8000,8001,8002,8003", "8000,8000,8002,8003,8004",
+                      "8000,8001,8002,8003,70000", "8000,8001,8002,8003,no"]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                serve.allocated_ports({"ARNOLD_WORKER_0_PORT": value}, 0, 4, with_limiter=True)
+
     def test_runtime_credentials_are_required_and_routed(self):
         configure = module("configure_agent")
         with self.assertRaisesRegex(ValueError, "EMERGE_API_KEY"):
