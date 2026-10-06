@@ -199,3 +199,5 @@ python deployment/merlin/verify_run.py \
 服务端口从各 worker 的 `ARNOLD_WORKER_<rank>_PORT` 分配列表读取，模型各占一个，rank 0 的 API 限速器另占一个。配置 `ports` 必须覆盖这些服务；缺失、重复或不足时启动直接失败。多个半机 worker 可能共享宿主机网络，不能固定使用 8000–8003 或 8100，也不能根据端口连续性推导地址。客户端统一读取发布的服务 manifest。
 
 `source-lock.json` 的仓库条目可指定 `bundle`（HDFS 挂载内的绝对路径）和 `bundle_sha256`。启动先校验 Git bundle，再从中 fetch 固定分支，并验证指定 commit 属于该分支；origin URL 保留仓库来源。Bundle 校验失败直接报错，不回退网络或覆盖脏源码。多机启动优先使用封存的 bundle，避免节点同时访问 GitHub。
+
+私有 env 文件中的 `EMERGE_ASSET_PROXY` 会同时注入平台 `env_map` 的 `http_proxy`、`https_proxy`、`HTTP_PROXY`、`HTTPS_PROXY`，在平台初始化阶段即生效。评测和推理入口也统一设置这些变量，并将 `no_proxy` / `NO_PROXY` 固定为 `localhost,127.0.0.1,::1,.byted.org`，避免继承宿主机的 `*` 或 GitHub 绕过规则。当前集群使用 `http://sys-proxy-rd-relay.byted.org:8118`；AIDP 和模型服务客户端继续使用内部直连配置。

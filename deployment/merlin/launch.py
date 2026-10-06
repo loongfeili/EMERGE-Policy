@@ -78,6 +78,13 @@ def make_request(base, release, config_name, env):
     for key in sorted(allowed_keys):
         if env.get(key):
             variables[key] = env[key]
+    if env.get("EMERGE_ASSET_PROXY"):
+        # Set these before the platform bootstrap, as well as in our entrypoint.
+        # Do not inherit a host's NO_PROXY=* (or a GitHub bypass) into this job.
+        variables.update({key: env["EMERGE_ASSET_PROXY"]
+                          for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")})
+        variables.update(no_proxy="localhost,127.0.0.1,::1,.byted.org",
+                         NO_PROXY="localhost,127.0.0.1,::1,.byted.org")
     if cfg["kind"] == "eval" and not (variables.get("EMERGE_API_KEY") or variables.get("AZURE_OPENAI_API_KEY")):
         raise ValueError("Export EMERGE_API_KEY or AZURE_OPENAI_API_KEY before submission")
     script = "entrypoint.sh" if cfg["kind"] == "eval" else "infer-entrypoint.sh"
@@ -88,7 +95,7 @@ def make_request(base, release, config_name, env):
         + "printf '%s  %s\\n' " + shlex.quote(digest) + " /tmp/emerge-entrypoint.sh | sha256sum -c -\n"
         + "exec bash /tmp/emerge-entrypoint.sh\n")
     template["env_map"] = variables
-    template["git_repo"] = {"repo_name": ""}  # entrypoint performs verified GitHub fetches
+    template["git_repo"] = {"repo_name": ""}  # entrypoint checks out the verified source lock
     name = "geometry_seg_infer" if cfg["kind"] == "infer" else cfg["run_id"]
     overrides = {k: base[k] for k in ("job_config", "attachments", "options", "namespace") if k in base}
     overrides.update(name=name, resource_config=cfg["resource_config"], attachments=cfg["attachments"])

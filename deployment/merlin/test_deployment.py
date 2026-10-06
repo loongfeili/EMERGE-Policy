@@ -177,6 +177,20 @@ class DeploymentTests(unittest.TestCase):
             for key, value in aidp.items():
                 self.assertEqual(variables[key], value)
             self.assertNotIn("EMERGE_API_KEY", variables)
+            proxy = "http://assets.invalid:8118"
+            for kind in ("eval", "infer"):
+                cfg["kind"] = kind
+                (release / "verify.json").write_text(json.dumps(cfg))
+                manifest = json.loads((release / "release.json").read_text())
+                manifest["files"]["verify.json"] = hashlib.sha256((release / "verify.json").read_bytes()).hexdigest()
+                (release / "release.json").write_text(json.dumps(manifest))
+                base["job_config"]["job_template_config"]["env_map"]["NO_PROXY"] = "*"
+                request = launch.make_request(base, release, "verify.json", {**aidp, "EMERGE_ASSET_PROXY": proxy})
+                variables = request["overrides"]["job_config"]["job_template_config"]["env_map"]
+                for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+                    self.assertEqual(variables[key], proxy)
+                self.assertEqual(variables["no_proxy"], "localhost,127.0.0.1,::1,.byted.org")
+                self.assertEqual(variables["NO_PROXY"], variables["no_proxy"])
             cfg["kind"] = "infer"
             (release / "verify.json").write_text(json.dumps(cfg))
             manifest = json.loads((release / "release.json").read_text())

@@ -6,7 +6,7 @@ export GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0
 if [[ -n "${EMERGE_ASSET_PROXY:-}" ]]; then
   export http_proxy="$EMERGE_ASSET_PROXY" https_proxy="$EMERGE_ASSET_PROXY"
   export HTTP_PROXY="$EMERGE_ASSET_PROXY" HTTPS_PROXY="$EMERGE_ASSET_PROXY"
-  export no_proxy="localhost,127.0.0.1,::1,.byted.org${no_proxy:+,$no_proxy}" NO_PROXY="localhost,127.0.0.1,::1,.byted.org${NO_PROXY:+,$NO_PROXY}"
+  export no_proxy="localhost,127.0.0.1,::1,.byted.org" NO_PROXY="localhost,127.0.0.1,::1,.byted.org"
 fi
 config_name=$(basename "$EMERGE_CONFIG")
 cp "$EMERGE_RELEASE/stage-release.py" /tmp/emerge-stage.py
