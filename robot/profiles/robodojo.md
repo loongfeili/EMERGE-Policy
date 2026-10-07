@@ -22,6 +22,11 @@ Supported actions:
 - `follow_arc`: `arm`, `center`, `axis`, `radius_m`, and `angle_deg` for a measured arc.
 - `recover`: use the generic recovery action when a bounded motion fails.
 
+When AC-WM mediation is enabled, state the visual subgoal in `reasoning`: the
+judge scores geometric proposals against it. One proposal is at most 64
+control steps (this caps `attempts` and waypoint `steps`), and a `vla_execute`
+result's `stop_reason` says why judged execution ended.
+
 Re-read `ROBOT_STATE.md` after each action. Update the plan from new images;
 sub-agent judgements are advisory, not benchmark success labels. Do not reset
 the environment, alter the task, or extend its step limit.

@@ -12,8 +12,12 @@ from Emerge.subagents import SubagentRegistry, SubagentTask, TextContent
 
 
 class DelegateSubagentTool(Tool):
-    def __init__(self, registry: SubagentRegistry) -> None:
+    def __init__(self, registry: SubagentRegistry, *, hidden_agents: tuple[str, ...] = ()) -> None:
         self._registry = registry
+        self._hidden_agents = frozenset(hidden_agents)
+
+    def _visible_agents(self):
+        return tuple(item for item in self._registry.list() if item.name not in self._hidden_agents)
 
     @property
     def name(self) -> str:
@@ -22,7 +26,7 @@ class DelegateSubagentTool(Tool):
     @property
     def description(self) -> str:
         agents = "; ".join(
-            f"{item.name}: {item.description}" for item in self._registry.list()
+            f"{item.name}: {item.description}" for item in self._visible_agents()
         )
         return (
             "Delegate a focused task to a registered specialist and wait for "
@@ -36,7 +40,7 @@ class DelegateSubagentTool(Tool):
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "enum": list(self._registry.names),
+                    "enum": [item.name for item in self._visible_agents()],
                     "description": "Registered specialist name",
                 },
                 "task": {

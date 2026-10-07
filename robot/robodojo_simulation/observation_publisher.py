@@ -144,6 +144,14 @@ class RoboDojoObservationPublisher:
         # monitor while the controlled arms are correctly holding still.
         self._temporal_root = self._workspace / "artifacts/observations/temporal"
         self._temporal_sequence = 0
+        self._revision = 0
+        # Full-resolution frames of the latest capture, before the VGGT resize.
+        self._latest_frames: dict[str, np.ndarray] = {}
+
+    @property
+    def revision(self) -> int:
+        """Revision of the latest live manifest written by this publisher."""
+        return self._revision
 
     def reference_camera_origin_m(self) -> np.ndarray | None:
         """Return the latest calibrated reference-camera origin.
@@ -193,9 +201,74 @@ class RoboDojoObservationPublisher:
                 max_localization_distance_m=3.0,
             )
         manifest_path = self._writer.write()
+        self._revision += 1
         if self._archive:
             self._archive_revision(manifest_path)
         return manifest_path
+
+    def write_ac_wm_snapshot(
+        self,
+        observation: Mapping[str, Any] | None = None,
+        *,
+        fps: float = 20.0,
+    ) -> dict[str, Any]:
+        """Save the frames AC-WM evaluates a proposal against.
+
+        The reference camera becomes a two-frame video, the world model's
+        vision input, and every camera is kept as a PNG for the judge. Without
+        ``observation`` the frames of the latest publish are reused, so a
+        rule-skill preview costs no render and adds no official video frame.
+        """
+        import time
+
+        import cv2
+
+        frames = self._vision_frames(observation) if observation is not None else dict(self._latest_frames)
+        reference = frames.get(self._reference)
+        if reference is None:
+            raise RuntimeError(f"AC-WM requires the reference camera {self._reference!r}")
+        destination = self._workspace / "artifacts/ac-wm/observations" / str(time.time_ns())
+        destination.mkdir(parents=True, exist_ok=True)
+        ordered = [self._reference] + [name for name in self._requested if name != self._reference]
+        images = []
+        for name in ordered:
+            if name not in frames:
+                continue
+            path = destination / f"{name}.png"
+            if not cv2.imwrite(str(path), np.ascontiguousarray(frames[name][..., ::-1])):
+                raise RuntimeError(f"could not write AC-WM observation frame {path}")
+            images.append(str(path))
+        video = destination / f"{self._reference}.mp4"
+        height, width = reference.shape[:2]
+        writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), float(fps), (width, height))
+        if not writer.isOpened():
+            raise RuntimeError(f"could not open AC-WM observation video writer: {video}")
+        try:
+            bgr = np.ascontiguousarray(reference[..., ::-1])
+            writer.write(bgr)
+            writer.write(bgr)
+        finally:
+            writer.release()
+        return {
+            "observation_path": str(video),
+            "observation_images": images,
+            "observation_revision": self._revision,
+        }
+
+    def _vision_frames(self, observation: Mapping[str, Any]) -> dict[str, np.ndarray]:
+        vision = observation.get("vision") if isinstance(observation, Mapping) else None
+        if not isinstance(vision, Mapping):
+            return {}
+        frames: dict[str, np.ndarray] = {}
+        for name in self._requested:
+            payload = vision.get(name)
+            if not isinstance(payload, Mapping) or "color" not in payload:
+                continue
+            rgb = _numpy(payload["color"])
+            if rgb.ndim != 3 or rgb.shape[-1] < 3:
+                continue
+            frames[name] = np.ascontiguousarray(rgb[..., :3].astype(np.uint8, copy=False))
+        return frames
 
     def publish_temporal(
         self,
@@ -304,16 +377,16 @@ class RoboDojoObservationPublisher:
         origin = self._environment_origin()
 
         views: list[_CameraView] = []
+        frames = {
+            name: rgb for name, rgb in self._vision_frames(observation).items()
+            if name in available
+        }
+        if frames:
+            self._latest_frames = frames
         for name in self._requested:
-            if name not in available or name not in vision:
+            if name not in frames:
                 continue
-            payload = vision[name]
-            if not isinstance(payload, Mapping) or "color" not in payload:
-                continue
-            rgb = _numpy(payload["color"])
-            if rgb.ndim != 3 or rgb.shape[-1] < 3:
-                continue
-            rgb = np.ascontiguousarray(rgb[..., :3].astype(np.uint8, copy=False))
+            rgb = frames[name]
 
             camera = camera_manager.cameras[0][available.index(name)]
             intrinsics = _numpy(

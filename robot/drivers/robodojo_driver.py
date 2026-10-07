@@ -15,6 +15,8 @@ from robot.drivers.base_driver import BaseDriver, CancelCheck
 from robot.robodojo_simulation.action_controller import RoboDojoActionController
 from robot.robodojo_simulation.tensors import to_float_array
 
+_NON_STEPPING_ACTIONS = frozenset({"vla_propose", "rule_propose"})
+
 
 class RoboDojoDriver(BaseDriver):
     """Expose RoboDojo rule skills and Pi0.5 through one action dispatcher."""
@@ -85,7 +87,9 @@ class RoboDojoDriver(BaseDriver):
         finally:
             # Rule actions never fetch an observation of their own, so without
             # this the agent would verify the scene as it was before the action.
-            self._publish_observation()
+            # AC-WM proposals do not step the scene, so there is nothing new.
+            if action_type not in _NON_STEPPING_ACTIONS:
+                self._publish_observation()
         return result
 
     def _publish_observation(self) -> None:

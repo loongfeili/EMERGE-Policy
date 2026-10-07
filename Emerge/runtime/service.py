@@ -20,9 +20,13 @@ def build_agent(config):
     from Emerge.providers.factory import create_provider
     from Emerge.utils.helpers import sync_workspace_templates
 
+    from Emerge.ac_wm.runtime import build_ac_wm_components
+
     sync_workspace_templates(config.workspace_path, silent=True)
+    provider = create_provider(config)
+    ac_wm_rollout, ac_wm_judge = build_ac_wm_components(config, provider)
     return AgentLoop(
-        bus=MessageBus(), provider=create_provider(config), workspace=config.workspace_path,
+        bus=MessageBus(), provider=provider, workspace=config.workspace_path,
         model=config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
         context_window_tokens=config.agents.defaults.context_window_tokens,
@@ -30,6 +34,8 @@ def build_agent(config):
         object_location_subagent_config=config.subagents.object_location,
         task_verification_subagent_config=config.subagents.task_verification,
         visual_monitor_config=config.visual_monitor,
+        ac_wm_rollout=ac_wm_rollout,
+        ac_wm_judge=ac_wm_judge,
     )
 
 

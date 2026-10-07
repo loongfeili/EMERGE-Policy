@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any, Callable
 
 import numpy as np
 
 from robot.mujoco_simulation.pose_utils import PoseUtils
+
+# AC-WM proposals are bounded so one world-model rollout covers the whole chunk.
+_AC_WM_MAX_ROWS = 64
 
 
 class _ActionInterrupted(Exception):
@@ -67,6 +71,7 @@ class MujocoActionController:
     ) -> str:
         policy_backend = {
             "vla_execute": "vla",
+            "vla_propose": "vla",
             "wam_execute": "wam",
         }.get(action_type)
         if (
@@ -81,6 +86,9 @@ class MujocoActionController:
             "follow_arc": self._follow_arc,
             "vla_execute": self._vla_execute,
             "wam_execute": self._wam_execute,
+            "vla_propose": self._vla_propose,
+            "rule_propose": self._rule_propose,
+            "execute_action_chunk": self._execute_action_chunk,
         }
         handler = handlers.get(action_type)
         if handler is None:
@@ -193,6 +201,205 @@ class MujocoActionController:
             f"Failed: WAM execution {result.reason} "
             f"after {result.total_steps} steps{detail}{search_detail}."
         )
+
+    def _vla_propose(self, params: dict[str, Any]) -> str:
+        """Generate, but do not execute, a VLA candidate for AC-WM."""
+        if self._vla is None:
+            return "Failed: LIBERO VLA executor is not initialized"
+        instruction = str(params.get("instruction", "")).strip()
+        if not instruction:
+            return "Failed: vla_propose requires instruction"
+        horizon = max(1, min(int(params.get("horizon", 32)), _AC_WM_MAX_ROWS))
+        max_execute = max(1, int(params.get("max_execute_steps", horizon)))
+        # Capture the conditioning frame before policy inference. The simulator
+        # is paused during inference, so these controls and pixels now refer to
+        # exactly the same environment state.
+        observation_path, revision = self._write_ac_wm_observation()
+        actions = self._vla.propose(instruction, horizon)
+        return "VLA_PROPOSAL:" + self._ac_wm_proposal(
+            actions, min(self._vla.replan_steps, max_execute, len(actions)), observation_path, revision,
+        )
+
+    def _rule_propose(self, params: dict[str, Any]) -> str:
+        """Build a non-executing action7 preview for a rule-based skill."""
+        action_type = str(params.get("skill_action_type", "")).strip()
+        skill_params = dict(params.get("parameters") or {})
+        if action_type not in {"move_to_pose", "move_linear", "set_gripper", "follow_arc"}:
+            raise ValueError(f"unsupported rule skill for AC-WM: {action_type!r}")
+        observation_path, revision = self._write_ac_wm_observation()
+        actions = self._preview_rule_actions(action_type, skill_params)
+        return "RULE_PROPOSAL:" + self._ac_wm_proposal(actions, len(actions), observation_path, revision)
+
+    @staticmethod
+    def _ac_wm_proposal(actions: np.ndarray, execute_steps: int, observation_path, revision: int) -> str:
+        return json.dumps({
+            "actions": np.asarray(actions, dtype=float).tolist(),
+            "execute_steps": int(execute_steps),
+            "observation_path": str(observation_path),
+            "observation_revision": revision,
+            "domain_name": "libero",
+            "control_space": "libero_action7",
+        }, separators=(",", ":"))
+
+    def _preview_rule_actions(self, action_type: str, params: dict[str, Any]) -> np.ndarray:
+        """Translate the current geometric skill intent into a bounded OSC action chunk."""
+        max_horizon = _AC_WM_MAX_ROWS
+        gripper = self._active_gripper_signal()
+        start_position, start_orientation = self._environment.get_eef_pose()
+
+        if action_type == "set_gripper":
+            if "opening_m" in params:
+                opening = float(params["opening_m"])
+            elif "width_m" in params:
+                opening = float(params["width_m"])
+            elif str(params.get("command", "")).strip().lower() == "open":
+                opening = self.gripper_max_opening
+            elif str(params.get("command", "")).strip().lower() == "close":
+                opening = 0.0
+            else:
+                raise ValueError("set_gripper requires opening_m, width_m, or command")
+            if not 0.0 <= opening <= self.gripper_max_opening:
+                raise ValueError(f"gripper opening must be between 0 and {self.gripper_max_opening:.4f} m")
+            signal = self._opening_to_signal(opening)
+            count = max(1, min(int(params.get("steps", self.config.get("gripper_steps", 30))), max_horizon))
+            return np.tile(np.asarray([0.0] * 6 + [signal], dtype=np.float32), (count, 1))
+
+        if action_type == "move_to_pose":
+            if "position_m" not in params:
+                raise ValueError("move_to_pose requires position_m")
+            target_position = PoseUtils.vector(params["position_m"], name="position_m")
+            target_orientation = PoseUtils.resolve_orientation(params)
+            if target_orientation is None:
+                raise ValueError("move_to_pose requires orientation_quat or orientation_euler")
+            count = max(1, min(int(params.get("steps", self.max_steps)), max_horizon))
+            position_delta = (target_position - start_position) / count
+            rotation_delta = PoseUtils.quaternion_error(start_orientation, target_orientation) / count
+            row = self._pose_action(position_delta, rotation_delta, gripper)
+            return np.tile(row, (count, 1))
+
+        if action_type == "move_linear":
+            if "position_m" in params:
+                target_position = PoseUtils.vector(params["position_m"], name="position_m")
+            elif "delta_m" in params:
+                target_position = start_position + PoseUtils.vector(params["delta_m"], name="delta_m")
+            else:
+                raise ValueError("move_linear requires position_m or delta_m")
+            target_orientation = PoseUtils.resolve_orientation(params)
+            if target_orientation is None:
+                target_orientation = start_orientation
+            requested_steps = max(1, int(params.get("steps", self.config.get("move_linear_steps", 80))))
+            count = max(1, min(requested_steps, max_horizon))
+            position_delta = (target_position - start_position) / count
+            rotation_delta = PoseUtils.quaternion_error(start_orientation, target_orientation) / count
+            row = self._pose_action(position_delta, rotation_delta, gripper)
+            rows = [row.copy() for _ in range(count)]
+            settle = max(0, min(int(params.get("settle_steps", 40)), max_horizon - count))
+            rows.extend(np.asarray([0.0] * 6 + [gripper], dtype=np.float32) for _ in range(settle))
+            return np.asarray(rows, dtype=np.float32)
+
+        center = PoseUtils.vector(params.get("center"), name="center")
+        axis = PoseUtils.vector(params.get("axis"), name="axis")
+        radius = float(params.get("radius_m", 0.0))
+        if radius <= 0.0:
+            raise ValueError("follow_arc.radius_m must be positive")
+        angle = self._resolve_angle(params)
+        mode = str(params.get("orientation_mode", "fixed")).strip().lower()
+        if mode not in {"fixed", "co_rotate"}:
+            raise ValueError("orientation_mode must be fixed or co_rotate")
+        requested_steps = max(1, int(params.get("steps", self.config.get("follow_arc_steps", 100))))
+        count = max(1, min(requested_steps, max_horizon))
+        axis_norm = float(np.linalg.norm(axis))
+        if axis_norm <= 1e-10:
+            raise ValueError("follow_arc.axis must be non-zero")
+        axis_unit = axis / axis_norm
+        start_vector = start_position - center
+        start_norm = float(np.linalg.norm(start_vector))
+        if start_norm <= 1e-10:
+            raise ValueError("end-effector cannot start at the arc center")
+        start_vector = start_vector / start_norm * radius
+        requested_orientation = PoseUtils.resolve_orientation(params)
+        if requested_orientation is not None:
+            start_orientation = requested_orientation
+        previous_position = start_position.copy()
+        previous_orientation = start_orientation.copy()
+        rows = []
+        for index in range(count):
+            step_angle = angle * float(index + 1) / count
+            target_position = center + PoseUtils.rotate_vector(start_vector, axis_unit, step_angle)
+            if mode == "co_rotate":
+                delta_q = PoseUtils.axis_angle_to_quaternion(axis_unit * step_angle)
+                target_orientation = PoseUtils.quaternion_multiply(delta_q, start_orientation)
+            else:
+                target_orientation = start_orientation
+            rows.append(self._pose_action(
+                target_position - previous_position,
+                PoseUtils.quaternion_error(previous_orientation, target_orientation),
+                gripper,
+            ))
+            previous_position = target_position
+            previous_orientation = target_orientation
+        return np.asarray(rows, dtype=np.float32)
+
+    def _write_ac_wm_observation(self):
+        """Save the current calibrated reference view as a short conditioning video."""
+        import time
+
+        import cv2
+
+        self._environment.refresh_cameras()
+        reference = next(
+            (camera for camera in self._environment.cameras.values()
+             if camera.get_observation_output().enabled and camera.get_observation_output().reference),
+            None,
+        )
+        if reference is None:
+            raise RuntimeError("AC-WM requires one enabled reference observation camera")
+        frame = np.asarray(reference.get_rgb(), dtype=np.uint8)
+        height, width = frame.shape[:2]
+        output = self._environment.workspace / "artifacts" / "ac-wm" / f"observation-{time.time_ns()}.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(str(output), cv2.VideoWriter_fourcc(*"mp4v"), 20.0, (width, height))
+        if not writer.isOpened():
+            raise RuntimeError(f"could not open AC-WM observation video writer: {output}")
+        try:
+            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            writer.write(bgr)
+            writer.write(bgr)
+        finally:
+            writer.release()
+        manifest_path = self._environment.workspace / "artifacts" / "observations" / "observation.json"
+        revision = int(json.loads(manifest_path.read_text()).get("revision", 0)) if manifest_path.is_file() else 0
+        return output, revision
+
+    def _execute_action_chunk(self, params: dict[str, Any]) -> str:
+        """Execute selected rows verbatim through the active LIBERO environment."""
+        raw = np.asarray(params.get("actions"), dtype=np.float32)
+        if raw.ndim != 2 or raw.shape[1] != 7 or not 1 <= len(raw) <= _AC_WM_MAX_ROWS:
+            raise ValueError(f"execute_action_chunk requires 1..{_AC_WM_MAX_ROWS} action rows of width 7")
+        if not np.all(np.isfinite(raw)):
+            raise ValueError("execute_action_chunk actions must be finite")
+        executed = 0
+        reason = "chunk_completed"
+        try:
+            for action in raw:
+                self._check_interrupted()
+                _, _, done, _ = self._environment.step(action, publish_observation=True)
+                executed += 1
+                self._gripper_command = float(np.clip(action[6], -1.0, 1.0))
+                if self._environment.check_success():
+                    reason = "goal_reached"
+                    break
+                if done:
+                    reason = "environment_done"
+                    break
+        except _ActionInterrupted as exc:
+            return f"Interrupted: {exc}; steps={executed}, reason=interrupted"
+        finally:
+            if executed:
+                self._environment.refresh_cameras()
+        return (f"Selected candidate {params.get('candidate_id', 'unknown')} from skill "
+                f"{params.get('skill_name', 'unknown')} executed its exact proposed prefix: "
+                f"steps={executed}, reason={reason}.")
 
     def _move_to_pose(self, params: dict[str, Any]) -> str:
         if "position_m" not in params:

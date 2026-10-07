@@ -277,6 +277,99 @@ def _model_metadata(config_path: Path) -> dict[str, Any]:
     }
 
 
+_AC_WM_DOMAINS = ("robodojo_joint", "robodojo_ee")
+
+
+def _configure_ac_wm(args: argparse.Namespace, env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Resolve the AC-WM switch into the environment every agent inherits.
+
+    Returns the run metadata for the setting. Cosmos mode is checked here, so a
+    missing interpreter or checkpoint fails before any simulator starts rather
+    than as a failed rollout in every episode.
+    """
+    env = os.environ if env is None else env
+    if args.ac_wm is None:
+        args.ac_wm = env.get("EMERGE_AC_WM", "").strip().lower() in {"1", "true", "yes", "on"}
+    env["EMERGE_AC_WM"] = "1" if args.ac_wm else "0"
+    if not args.ac_wm:
+        return {"ac_wm": {"enabled": False}}
+    if args.policy_baseline:
+        raise ValueError("--ac-wm mediates agent actions and cannot be combined with --policy-baseline")
+    rollout = args.ac_wm_rollout or env.get("EMERGE_AC_WM_ROLLOUT", "").strip().lower() or "observation"
+    if rollout not in {"observation", "cosmos"}:
+        raise ValueError(f"--ac-wm-rollout must be observation or cosmos, got {rollout!r}")
+    env["EMERGE_AC_WM_ROLLOUT"] = rollout
+    if args.ac_wm_judge_model:
+        env["EMERGE_AC_WM_JUDGE_MODEL"] = args.ac_wm_judge_model
+    metadata: dict[str, Any] = {
+        "enabled": True,
+        "rollout": rollout,
+        "judge": env.get("EMERGE_AC_WM_JUDGE", "provider"),
+        "judge_model": env.get("EMERGE_AC_WM_JUDGE_MODEL"),
+    }
+    if rollout == "cosmos":
+        python = env.get("COSMOS_PYTHON", "").strip()
+        checkpoint = env.get("COSMOS_CHECKPOINT", "").strip()
+        if not python or not Path(python).is_file():
+            raise ValueError(f"--ac-wm-rollout cosmos requires COSMOS_PYTHON to be a file, got {python!r}")
+        if not checkpoint:
+            raise ValueError("--ac-wm-rollout cosmos requires COSMOS_CHECKPOINT")
+        domain_map = {
+            key.strip(): value.strip()
+            for key, _, value in (
+                item.partition("=") for item in env.get("COSMOS_DOMAIN_MAP", "").split(",") if "=" in item
+            )
+        }
+        unmapped = [domain for domain in _AC_WM_DOMAINS if domain not in domain_map]
+        if unmapped:
+            print(
+                "[robodojo-eval] WARNING COSMOS_DOMAIN_MAP has no entry for "
+                + ", ".join(unmapped)
+                + "; Cosmos receives the Emerge domain name unchanged.",
+                flush=True,
+            )
+        metadata.update({
+            "cosmos_checkpoint": checkpoint,
+            "cosmos_domain_map": domain_map,
+            "cosmos_action_horizon": env.get("COSMOS_ACTION_HORIZON", "32"),
+        })
+    return {"ac_wm": metadata}
+
+
+def _ac_wm_stats(workspace: Path, model_metadata: dict[str, Any]) -> dict[str, Any]:
+    """Summarize the verdicts AC-WM recorded during one episode."""
+    if not (model_metadata.get("ac_wm") or {}).get("enabled"):
+        return {}
+    decisions: list[dict[str, Any]] = []
+    try:
+        lines = (workspace / "artifacts/ac-wm/decisions.jsonl").read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            decisions.append(item)
+    rejected = [item for item in decisions if item.get("evaluations") and not item.get("selected_candidate_id")]
+    scores = [float(item["score"]) for item in decisions if isinstance(item.get("score"), (int, float))]
+    by_action: dict[str, int] = {}
+    for item in decisions:
+        action = str(item.get("action_type"))
+        by_action[action] = by_action.get(action, 0) + 1
+    return {
+        "ac_wm_stats": {
+            "decisions": len(decisions),
+            "dispatched": sum(bool(item.get("dispatched")) for item in decisions),
+            "rejected": len(rejected),
+            "failed": sum(item.get("status") != "success" for item in decisions) - len(rejected),
+            "mean_selected_score": round(sum(scores) / len(scores), 4) if scores else None,
+            "by_action": by_action,
+        }
+    }
+
+
 def _missing_provider_credentials(
     config_path: Path, env: dict[str, str] | None = None
 ) -> list[str]:
@@ -505,6 +598,7 @@ def _run_episode(
         "workspace": str(workspace),
         "robodojo_save_dir": status.get("save_dir"),
         **model_metadata,
+        **_ac_wm_stats(workspace, model_metadata),
     }
 
 
@@ -597,6 +691,7 @@ def _persistent_result(
         "persistent_worker": True,
         "batch_log": str(batch_log_path),
         **model_metadata,
+        **_ac_wm_stats(workspace, model_metadata),
     }
 
 
@@ -884,6 +979,12 @@ def _write_summary(
         "per_task": per_task,
         **model_metadata,
     }
+    ac_wm_items = [item["ac_wm_stats"] for item in items if isinstance(item.get("ac_wm_stats"), dict)]
+    if ac_wm_items:
+        payload["ac_wm_totals"] = {
+            key: sum(int(stats.get(key) or 0) for stats in ac_wm_items)
+            for key in ("decisions", "dispatched", "rejected", "failed")
+        }
     _atomic_write_json(path, payload)
 
 
@@ -1053,6 +1154,31 @@ def _parse_args() -> argparse.Namespace:
             "diagnostic batches; a full run would write a lot of images."
         ),
     )
+    parser.add_argument(
+        "--ac-wm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Mediate every robot-motion skill through AC-WM: the skill proposes "
+            "controls, a rollout and VLM judge score them, and only accepted "
+            "controls execute. Defaults to $EMERGE_AC_WM."
+        ),
+    )
+    parser.add_argument(
+        "--ac-wm-rollout",
+        choices=("observation", "cosmos"),
+        default=None,
+        help=(
+            "observation: judge proposals against the current camera views (no "
+            "world model). cosmos: predict each proposal with the Cosmos3 model "
+            "configured by COSMOS_*. Defaults to $EMERGE_AC_WM_ROLLOUT or observation."
+        ),
+    )
+    parser.add_argument(
+        "--ac-wm-judge-model",
+        default=None,
+        help="Judge model; defaults to the task_verification subagent model.",
+    )
     parser.add_argument("--episode-timeout-s", type=float, default=3600.0)
     parser.add_argument(
         "--run-dir",
@@ -1184,7 +1310,7 @@ def main() -> None:
     if sync_dir is not None:
         sync_dir.mkdir(parents=True, exist_ok=True)
 
-    model_metadata = _model_metadata(agent_config)
+    model_metadata = {**_model_metadata(agent_config), **_configure_ac_wm(args)}
     specs = [
         {
             "episode_key": f"{task}:layout-{layout}:seed-{args.policy_seed}",
@@ -1253,7 +1379,8 @@ def main() -> None:
         f"scheduled={len(specs)} of {total_episodes} "
         f"pending={len(pending)} workers={len(devices) * args.workers_per_device} "
         f"persistent={args.persistent_workers} "
-        f"model={model_metadata['llm_model']}",
+        f"model={model_metadata['llm_model']} "
+        f"ac_wm={model_metadata['ac_wm'].get('rollout') if args.ac_wm else 'off'}",
         flush=True,
     )
     if args.record_every_step:

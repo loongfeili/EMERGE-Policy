@@ -13,6 +13,7 @@ is kept at this boundary so every skill sees the same quaternion convention.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
@@ -21,9 +22,29 @@ import numpy as np
 
 from robot.mujoco_simulation.pose_utils import PoseUtils
 from robot.robodojo_simulation.tensors import to_float_array, to_numpy
-from robot.vla.robodojo_policy import encode_observation, unpack_joint_actions
+from robot.vla.robodojo_policy import ACTION_DIM, encode_observation, unpack_joint_actions
 
 _ARM_NAMES = ("left", "right")
+
+# AC-WM proposals are bounded so one world-model rollout covers the whole chunk.
+_AC_WM_MAX_ROWS = 64
+_JOINT_CONTROL = "robodojo_joint14"
+_EE_CONTROL = "robodojo_ee16"
+_EE_WIDTH = 16
+_CONTROL_DOMAINS = {_JOINT_CONTROL: "robodojo_joint", _EE_CONTROL: "robodojo_ee"}
+_CONTROL_DESCRIPTIONS = {
+    _JOINT_CONTROL: (
+        "RoboDojo dual ARX-X5 absolute joint-position rows (one row per control step, ~0.4 s): "
+        "[left 6 joint angles (rad), left gripper opening, right 6 joint angles (rad), "
+        "right gripper opening]; gripper opening is normalized, 0 closed and 1 open"
+    ),
+    _EE_CONTROL: (
+        "RoboDojo dual ARX-X5 end-effector waypoint rows in the robodojo_env frame (one row "
+        "per control step, ~0.4 s): [left xyz (m), left quaternion xyzw, left gripper opening, "
+        "right xyz (m), right quaternion xyzw, right gripper opening]; gripper opening is "
+        "normalized, 0 closed and 1 open"
+    ),
+}
 
 
 # Declared here rather than reused from ``robot.mujoco_simulation.mujoco_actions``
@@ -88,6 +109,10 @@ class RoboDojoActionController:
         self.vla_stall_tolerance_m = float(
             self.config.get("vla_stall_tolerance_m", 0.005)
         )
+        # Steps of each judged Pi0.5 chunk that AC-WM executes before replanning.
+        self.ac_wm_execute_steps = max(
+            1, int(self.config.get("ac_wm_execute_steps", self.replan_steps))
+        )
         self._cancel_check: Callable[[], str | None] | None = None
 
     def execute(
@@ -104,6 +129,9 @@ class RoboDojoActionController:
             "follow_arc": self._follow_arc,
             "vla_execute": self._vla_execute,
             "recover": self._recover,
+            "vla_propose": self._vla_propose,
+            "rule_propose": self._rule_propose,
+            "execute_action_chunk": self._execute_action_chunk,
         }
         handler = handlers.get(str(action_type).strip())
         if handler is None:
@@ -344,6 +372,264 @@ class RoboDojoActionController:
             f"RoboDojo VLA execution finished: {outcome}, "
             f"steps={total_steps}, inference_calls={inference_calls}."
         )
+
+    def _vla_propose(self, params: dict[str, Any]) -> str:
+        """Infer one Pi0.5 chunk for AC-WM to judge, without stepping the scene."""
+        if self._policy_client is None:
+            raise RuntimeError("RoboDojo Pi0.5 policy client is not configured")
+        instruction = str(
+            params.get("instruction", params.get("prompt", ""))
+        ).strip()
+        if not instruction:
+            raise ValueError("vla_propose requires instruction or prompt")
+        horizon = max(1, min(int(params.get("horizon", _AC_WM_MAX_ROWS)), _AC_WM_MAX_ROWS))
+        max_execute = max(1, int(params.get("max_execute_steps", horizon)))
+        execute_limit = max(1, int(params.get("replan_steps", self.ac_wm_execute_steps)))
+        if self._terminal():
+            return self._terminal_action_result("vla_propose")
+        observation = dict(self._environment.get_obs())
+        observation["instruction"] = instruction
+        self._publish_observation(observation)
+        snapshot = self._ac_wm_snapshot(observation)
+        result = self._policy_client.infer(encode_observation(observation))
+        if "actions" not in result:
+            raise RuntimeError("Pi0.5 response is missing actions")
+        rows = self._action_rows(result["actions"], ACTION_DIM, name="Pi0.5 actions")[:horizon]
+        execute_steps = min(execute_limit, max_execute, len(rows))
+        return "VLA_PROPOSAL:" + self._proposal(rows, execute_steps, _JOINT_CONTROL, snapshot)
+
+    def _rule_propose(self, params: dict[str, Any]) -> str:
+        """Preview a geometric skill as the exact rows it would command."""
+        skill = str(params.get("skill_action_type", "")).strip()
+        inner = params.get("parameters")
+        if not isinstance(inner, Mapping):
+            raise ValueError("rule_propose requires parameters")
+        builders = {
+            "move_to_pose": self._preview_move_to_pose,
+            "move_linear": self._preview_move_linear,
+            "follow_arc": self._preview_follow_arc,
+            "set_gripper": self._preview_set_gripper,
+        }
+        builder = builders.get(skill)
+        if builder is None:
+            raise ValueError(f"rule_propose does not support {skill!r}")
+        if self._terminal():
+            return self._terminal_action_result("rule_propose")
+        rows, control_space = builder(dict(inner))
+        snapshot = self._ac_wm_snapshot()
+        return "RULE_PROPOSAL:" + self._proposal(rows, len(rows), control_space, snapshot)
+
+    def _execute_action_chunk(self, params: dict[str, Any]) -> str:
+        """Replay exactly the rows AC-WM selected, stopping only at a terminal or arrival."""
+        control_space = str(params.get("control_space") or _JOINT_CONTROL)
+        if control_space not in _CONTROL_DOMAINS:
+            raise ValueError(f"unsupported control_space {control_space!r}")
+        width = ACTION_DIM if control_space == _JOINT_CONTROL else _EE_WIDTH
+        rows = self._action_rows(params.get("actions"), width, name="execute_action_chunk.actions")
+        if len(rows) > _AC_WM_MAX_ROWS:
+            raise ValueError(f"execute_action_chunk accepts at most {_AC_WM_MAX_ROWS} rows")
+        candidate_id = str(params.get("candidate_id", "candidate"))
+        skill_name = str(params.get("skill_name", "unknown"))
+        if control_space == _JOINT_CONTROL:
+            actions = unpack_joint_actions(rows)
+            final, hold_from = None, len(rows)
+        else:
+            actions = [self._ee16_action(row) for row in rows]
+            final = self._ee16_targets(rows[-1])
+            # Rows equal to the final waypoint only hold it; stop once it is reached.
+            hold_from = len(rows) - 1
+            while hold_from > 0 and np.array_equal(rows[hold_from - 1], rows[-1]):
+                hold_from -= 1
+
+        steps, reason = 0, "chunk_completed"
+        try:
+            for index, action in enumerate(actions):
+                self._check_interrupted()
+                self._environment.take_action(action)
+                steps += 1
+                if self._terminal():
+                    break
+                if final is not None and index >= hold_from and self._targets_reached(final):
+                    reason = "target_reached"
+                    break
+        except _ActionInterrupted as exc:
+            return f"Interrupted: {exc}; steps={steps}, reason=interrupted"
+        if self._terminal():
+            if not self._task_succeeded():
+                return (
+                    "Failed: RoboDojo selected chunk reached a failed terminal state; "
+                    f"steps={steps}, reason=failed_terminal"
+                )
+            reason = "goal_reached"
+        elif final is not None and not self._targets_reached(final):
+            return (
+                f"Failed: {skill_name} chunk did not converge to its final waypoint; "
+                f"steps={steps}, reason=not_converged"
+            )
+        return (
+            f"Selected candidate {candidate_id} from skill {skill_name} executed its "
+            f"exact proposed prefix: steps={steps}, reason={reason}."
+        )
+
+    def _preview_move_to_pose(self, params: dict[str, Any]) -> tuple[list[list[float]], str]:
+        targets = self._resolve_targets(params, require_orientation=True)
+        attempts = max(1, int(params.get("attempts", self.max_pose_attempts)))
+        return self._ee16_rows([targets] * min(attempts, _AC_WM_MAX_ROWS)), _EE_CONTROL
+
+    def _preview_move_linear(self, params: dict[str, Any]) -> tuple[list[list[float]], str]:
+        arm = self._require_single_arm(params)
+        start_position, start_orientation = self._current_pose_xyzw(arm)
+        if "position_m" in params:
+            target_position = PoseUtils.vector(params["position_m"], name="position_m")
+        elif "delta_m" in params:
+            target_position = start_position + PoseUtils.vector(params["delta_m"], name="delta_m")
+        else:
+            raise ValueError("move_linear requires position_m or delta_m")
+        target_orientation = PoseUtils.resolve_orientation(params)
+        if target_orientation is None:
+            target_orientation = start_orientation
+        steps = min(max(1, int(params.get("steps", self.move_linear_steps))), _AC_WM_MAX_ROWS)
+        waypoints = []
+        for index in range(steps):
+            alpha = float(index + 1) / float(steps)
+            waypoints.append({arm: (
+                start_position * (1.0 - alpha) + target_position * alpha,
+                self._slerp(start_orientation, target_orientation, alpha),
+            )})
+        waypoints += [{arm: (target_position, target_orientation)}] * min(
+            self.settle_attempts, _AC_WM_MAX_ROWS - steps
+        )
+        return self._ee16_rows(waypoints), _EE_CONTROL
+
+    def _preview_follow_arc(self, params: dict[str, Any]) -> tuple[list[list[float]], str]:
+        arm = self._require_single_arm(params)
+        center = PoseUtils.vector(params.get("center"), name="center")
+        axis = PoseUtils.vector(params.get("axis"), name="axis")
+        norm = float(np.linalg.norm(axis))
+        if norm <= 1e-12:
+            raise ValueError("follow_arc.axis must be non-zero")
+        axis = axis / norm
+        if "radius_m" not in params:
+            raise ValueError("follow_arc requires radius_m")
+        radius = float(params["radius_m"])
+        if not math.isfinite(radius) or radius <= 0:
+            raise ValueError("follow_arc.radius_m must be positive")
+        angle = self._resolve_angle(params)
+        orientation_mode = str(params.get("orientation_mode", "fixed")).strip().lower()
+        if orientation_mode not in {"fixed", "co_rotate"}:
+            raise ValueError("orientation_mode must be fixed or co_rotate")
+        steps = min(max(1, int(params.get("steps", self.follow_arc_steps))), _AC_WM_MAX_ROWS)
+
+        start_position, start_orientation = self._current_pose_xyzw(arm)
+        requested_orientation = PoseUtils.resolve_orientation(params)
+        if requested_orientation is not None:
+            start_orientation = requested_orientation
+        start_vector = start_position - center
+        if float(np.linalg.norm(start_vector)) <= 1e-12:
+            raise ValueError("end-effector cannot start at the arc center")
+        start_vector = start_vector / np.linalg.norm(start_vector) * radius
+        waypoints = []
+        for index in range(steps):
+            step_angle = angle * float(index + 1) / float(steps)
+            position = center + PoseUtils.rotate_vector(start_vector, axis, step_angle)
+            orientation = start_orientation
+            if orientation_mode == "co_rotate":
+                delta = PoseUtils.axis_angle_to_quaternion(axis * step_angle)
+                orientation = PoseUtils.quaternion_multiply(delta, start_orientation)
+            waypoints.append({arm: (position, orientation)})
+        waypoints += [waypoints[-1]] * min(self.settle_attempts, _AC_WM_MAX_ROWS - steps)
+        return self._ee16_rows(waypoints), _EE_CONTROL
+
+    def _preview_set_gripper(self, params: dict[str, Any]) -> tuple[list[list[float]], str]:
+        arms = self._resolve_arms(params, allow_both=True)
+        opening = self._resolve_gripper_opening(params)
+        steps = min(max(1, int(params.get("steps", self.gripper_steps))), _AC_WM_MAX_ROWS)
+        manager = self._environment.robot_manager
+        row: list[float] = []
+        for arm in _ARM_NAMES:
+            joints = to_float_array(
+                manager.get_joint(self._robot(arm), env_idx_list=[0])[0]
+            ).reshape(-1)
+            if joints.shape != (6,) or not np.all(np.isfinite(joints)):
+                raise RuntimeError(f"RoboDojo returned invalid {arm} joint state")
+            row.extend(float(value) for value in joints)
+            row.append(opening if arm in arms else self._current_gripper(arm))
+        return [list(row) for _ in range(steps)], _JOINT_CONTROL
+
+    def _ee16_rows(
+        self, waypoints: list[Mapping[str, tuple[np.ndarray, np.ndarray]]],
+    ) -> list[list[float]]:
+        """Encode waypoints as ee16 rows; an arm without a target holds its pose."""
+        hold = {arm: self._current_pose_xyzw(arm) for arm in _ARM_NAMES}
+        grippers = {arm: self._current_gripper(arm) for arm in _ARM_NAMES}
+        rows = []
+        for targets in waypoints:
+            row: list[float] = []
+            for arm in _ARM_NAMES:
+                position, orientation = targets.get(arm, hold[arm])
+                row.extend(float(value) for value in position)
+                row.extend(float(value) for value in PoseUtils.normalize_quaternion(orientation))
+                row.append(grippers[arm])
+            rows.append(row)
+        return rows
+
+    @staticmethod
+    def _ee16_targets(row: np.ndarray) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        return {
+            arm: (row[index * 8:index * 8 + 3], PoseUtils.normalize_quaternion(row[index * 8 + 3:index * 8 + 7]))
+            for index, arm in enumerate(_ARM_NAMES)
+        }
+
+    def _ee16_action(self, row: np.ndarray) -> dict[str, np.ndarray]:
+        action: dict[str, np.ndarray] = {}
+        for index, arm in enumerate(_ARM_NAMES):
+            part = row[index * 8:(index + 1) * 8]
+            if not -1e-6 <= float(part[7]) <= 1.0 + 1e-6:
+                raise ValueError("ee16 gripper opening must be in normalized range [0, 1]")
+            action[f"{arm}_ee_pose"] = np.concatenate(
+                (part[:3], self._xyzw_to_wxyz(part[3:7]))
+            ).astype(np.float32)
+            action[f"{arm}_ee_joint_state"] = np.asarray(
+                [float(np.clip(part[7], 0.0, 1.0))], dtype=np.float32
+            )
+        return action
+
+    @staticmethod
+    def _action_rows(value: Any, width: int, *, name: str) -> np.ndarray:
+        try:
+            rows = to_float_array(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a numeric array") from exc
+        if rows.ndim == 1:
+            rows = rows[None, :]
+        if rows.ndim != 2 or rows.shape[1] != width or len(rows) == 0:
+            raise ValueError(f"{name} must have shape (rows, {width}), got {rows.shape}")
+        if not np.all(np.isfinite(rows)):
+            raise ValueError(f"{name} must be finite")
+        return rows
+
+    def _ac_wm_snapshot(self, observation: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        publisher = self._observation_publisher
+        if publisher is None or not hasattr(publisher, "write_ac_wm_snapshot"):
+            raise RuntimeError("AC-WM proposals require the RoboDojo observation publisher")
+        try:
+            return publisher.write_ac_wm_snapshot(observation)
+        except RuntimeError:
+            if observation is not None:
+                raise
+            # Nothing captured yet this episode: render once rather than fail.
+            return publisher.write_ac_wm_snapshot(dict(self._environment.get_obs()))
+
+    @staticmethod
+    def _proposal(rows: Any, execute_steps: int, control_space: str, snapshot: Mapping[str, Any]) -> str:
+        return json.dumps({
+            "actions": np.asarray(rows, dtype=np.float64).tolist(),
+            "execute_steps": int(execute_steps),
+            "domain_name": _CONTROL_DOMAINS[control_space],
+            "control_space": control_space,
+            "control_description": _CONTROL_DESCRIPTIONS[control_space],
+            **snapshot,
+        })
 
     def _resolve_targets(
         self,

@@ -37,6 +37,8 @@ while [[ $# -gt 0 ]]; do
     --agent-message) AGENT_MESSAGE="$2"; shift 2 ;;
     --session-id) SESSION_ID="$2"; shift 2 ;;
     --agent-python) AGENT_PYTHON="$2"; shift 2 ;;
+    --ac-wm) export EMERGE_AC_WM=1; shift ;;
+    --ac-wm-rollout) export EMERGE_AC_WM_ROLLOUT="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done

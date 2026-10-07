@@ -6,9 +6,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 try:
     from loguru import logger
@@ -34,6 +36,17 @@ _BASE_RESULT_TIMEOUT_S = 60.0
 _VLA_PER_STEP_TIMEOUT_S = 15.0
 _WAM_INFERENCE_TIMEOUT_S = 180.0
 _WAM_PER_STEP_TIMEOUT_S = 2.0
+_PROPOSAL_INFERENCE_TIMEOUT_S = 180.0
+
+_AC_WM_MEDIATED_ACTIONS = frozenset({
+    "vla_execute", "move_to_pose", "move_linear", "set_gripper", "follow_arc",
+})
+_AC_WM_INTERNAL_ACTIONS = frozenset({
+    "ac_wm_select", "vla_propose", "rule_propose", "execute_action_chunk",
+})
+_AC_WM_MAX_ROWS = 64
+_CHUNK_RESULT = re.compile(r"steps=(\d+), reason=([a-z_]+)")
+_VISUAL_MONITOR_MARKER = "The visual monitor already verified"
 
 
 class EmbodiedActionTool(Tool):
@@ -65,8 +78,19 @@ class EmbodiedActionTool(Tool):
                 "sensitive contact phase. VLA uses instruction; WAM keeps task and "
                 "phase instructions separate. "
             )
+        ac_wm_guidance = ""
+        if self.ac_wm_subagent is not None:
+            ac_wm_guidance = (
+                "Robot-motion skills (vla_execute, move_to_pose, move_linear, set_gripper, follow_arc) "
+                "are mediated by an internal AC-WM planner: the skill proposes controls, a world model "
+                "and VLM judge evaluate them, and only selected controls execute. The result is AC-WM "
+                "JSON; a rejected proposal did not move the robot, so replan from the latest observation. "
+                "vla_execute keeps proposing and executing judged chunks until its step budget is used, "
+                "the goal is reached, or a chunk is rejected. "
+            )
         return (
             "Execute a physical action on the robot. "
+            f"{ac_wm_guidance}"
             "Use explicit geometry-driven motion primitives for coarse approach and clear-space transport. "
             "Choose concrete poses, line segments, arc geometry, and gripper openings from the latest ROBOT_STATE.md or a successful object_location result. "
             f"{policy_guidance}"
@@ -153,9 +177,11 @@ class EmbodiedActionTool(Tool):
         self,
         workspace: Path,
         visual_interrupts: VisualInterruptCoordinator | None = None,
+        ac_wm_subagent=None,
     ):
         self.workspace = workspace
         self.visual_interrupts = visual_interrupts
+        self.ac_wm_subagent = ac_wm_subagent
         self.active_action_ids: set[str] = set()
         self.on_event = None
 
@@ -165,13 +191,7 @@ class EmbodiedActionTool(Tool):
         parameters: dict[str, Any],
         reasoning: str,
     ) -> str:
-        """Validate and enqueue an action in the active workspace."""
-        embodied_file = self.workspace / "EMBODIED.md"
-        action_file = self.workspace / "ACTION.md"
-
-        if not embodied_file.exists():
-            return f"Error: {embodied_file.name} not found for the target robot. Cannot dispatch action."
-
+        """Validate an action, mediating robot-motion skills through AC-WM when configured."""
         backend = os.environ.get("EMERGE_POLICY_BACKEND", "").strip().lower()
         requested_backend = {
             "vla_execute": "vla",
@@ -179,7 +199,19 @@ class EmbodiedActionTool(Tool):
         }.get(action_type)
         if backend in {"vla", "wam"} and requested_backend not in {None, backend}:
             return f"Error: {action_type} is disabled by EMERGE_POLICY_BACKEND={backend}"
+        if self.ac_wm_subagent is not None and action_type in _AC_WM_MEDIATED_ACTIONS:
+            return await self._execute_action_through_ac_wm(action_type, parameters, reasoning)
+        if action_type in _AC_WM_INTERNAL_ACTIONS:
+            return "Error: internal AC-WM/skill action; request the current subgoal through a supported robot action."
         parameters = self._effective_parameters(action_type, parameters)
+        return await self._dispatch_action(action_type, parameters)
+
+    async def _dispatch_action(self, action_type: str, parameters: dict[str, Any]) -> str:
+        """Enqueue a controller action without re-entering AC-WM mediation."""
+        embodied_file = self.workspace / "EMBODIED.md"
+        action_file = self.workspace / "ACTION.md"
+        if not embodied_file.exists():
+            return f"Error: {embodied_file.name} not found for the target robot. Cannot dispatch action."
         logger.info("Dispatching action: {} {}", action_type, parameters)
         accepted = self._accept_action(action_type, parameters, action_file)
         if isinstance(accepted, str):
@@ -194,6 +226,198 @@ class EmbodiedActionTool(Tool):
             dispatch_message=dispatch_message,
             timeout_s=self._result_timeout(action_type, parameters),
         )
+
+    async def _execute_action_through_ac_wm(
+        self, action_type: str, parameters: dict[str, Any], reasoning: str,
+    ) -> str:
+        if action_type == "vla_execute":
+            instruction = str(parameters.get("instruction", parameters.get("prompt", ""))).strip()
+            if not instruction:
+                return "Error: vla_execute requires instruction or prompt"
+            try:
+                step = int(parameters.get("step", 40))
+            except (TypeError, ValueError):
+                return "Error: vla_execute step must be an integer"
+            if step < 1:
+                return "Error: vla_execute step must be positive"
+            return await self._execute_vla_through_ac_wm(instruction, step, parameters, reasoning)
+
+        try:
+            step = max(1, min(int(parameters.get("steps", 32)), _AC_WM_MAX_ROWS))
+        except (TypeError, ValueError):
+            return f"Error: {action_type} steps must be an integer"
+        instruction = str(reasoning or "").strip()
+        if not instruction:
+            instruction = f"Execute the {action_type} skill using its supplied target parameters."
+        result = await self._run_ac_wm_selection(action_type, instruction, step, parameters, reasoning)
+        return json.dumps({"agent": "ac-wm", **self._selection_payload(result)}, ensure_ascii=False, default=str)
+
+    async def _execute_vla_through_ac_wm(
+        self, instruction: str, step: int, parameters: dict[str, Any], reasoning: str,
+    ) -> str:
+        """Run judged VLA chunks until the step budget, the goal, or a rejection stops it."""
+        remaining, executed, chunks = step, 0, []
+        stop_reason, last = "budget_exhausted", None
+        while remaining > 0:
+            last = await self._run_ac_wm_selection("vla_execute", instruction, remaining, parameters, reasoning)
+            output = last.output if isinstance(last.output, dict) else {}
+            if last.status.value != "success":
+                error = str(last.error or "")
+                match = _CHUNK_RESULT.search(error)
+                if match:
+                    executed += int(match.group(1))
+                    chunks.append({"selected_candidate_id": last.metadata.get("selected_candidate_id"),
+                                   "steps": int(match.group(1)), "reason": match.group(2)})
+                if _VISUAL_MONITOR_MARKER in error:
+                    stop_reason = "visual_monitor_verified"
+                elif match:
+                    stop_reason = match.group(2)
+                elif last.metadata.get("evaluations") and not last.metadata.get("selected_candidate_id"):
+                    stop_reason = "ac_wm_rejected"
+                else:
+                    stop_reason = "ac_wm_failed"
+                break
+            dispatch = str(output.get("dispatch_result") or "")
+            match = _CHUNK_RESULT.search(dispatch)
+            steps, reason = (int(match.group(1)), match.group(2)) if match else (0, "unparsed_dispatch_result")
+            executed += steps
+            remaining -= steps
+            chunks.append({"selected_candidate_id": output.get("selected_candidate_id"),
+                           "score": output.get("score"), "steps": steps, "reason": reason})
+            if _VISUAL_MONITOR_MARKER in dispatch:
+                stop_reason = "visual_monitor_verified"
+                break
+            if reason != "chunk_completed" or steps <= 0:
+                stop_reason = reason
+                break
+
+        if stop_reason in {"budget_exhausted", "goal_reached", "visual_monitor_verified"}:
+            status = "success"
+        else:
+            status = "partial" if executed else "failed"
+        summary = (
+            f"AC-WM executed {executed}/{step} VLA steps in {len(chunks)} selected chunk(s); "
+            f"stopped: {stop_reason}."
+        )
+        if stop_reason in {"ac_wm_rejected", "ac_wm_failed"}:
+            summary += " The last proposal was not executed; replan from the latest observation."
+        return json.dumps({
+            "status": status,
+            "agent": "ac-wm",
+            "action_type": "vla_execute",
+            "summary": summary,
+            "steps_executed": executed,
+            "requested_steps": step,
+            "stop_reason": stop_reason,
+            "chunks": chunks,
+            "last_selection": self._selection_payload(last) if last is not None else None,
+        }, ensure_ascii=False, default=str)
+
+    async def _run_ac_wm_selection(
+        self, action_type: str, instruction: str, step: int, parameters: dict[str, Any], reasoning: str,
+    ):
+        from Emerge.subagents.content import TextContent
+        from Emerge.subagents.models import SubagentTask
+
+        # No overall timeout: the proposal, the selection and the dispatch are
+        # each bounded, and cancelling mid-dispatch would orphan a moving robot.
+        task = SubagentTask(
+            content=(TextContent(instruction),),
+            input={"instruction": instruction, "step": step, "action_type": action_type,
+                   "parameters": dict(parameters), "reasoning": reasoning,
+                   "output_dir": str(self.workspace / "artifacts" / "ac-wm" / uuid4().hex)},
+        )
+        result = await self.ac_wm_subagent.run(task)
+        self._record_ac_wm_decision(task, result)
+        return result
+
+    @staticmethod
+    def _selection_payload(result) -> dict[str, Any]:
+        return {
+            "status": result.status.value,
+            "summary": result.summary,
+            "output": result.output,
+            "error": result.error,
+            "metadata": result.metadata,
+        }
+
+    def _record_ac_wm_decision(self, task, result) -> None:
+        """Append one AC-WM verdict so an episode can be audited after the fact."""
+        output = result.output if isinstance(result.output, dict) else {}
+        entry = {
+            "time": action_timestamp(),
+            "task_id": task.task_id,
+            "action_type": task.input.get("action_type"),
+            "instruction": task.input.get("instruction"),
+            "status": result.status.value,
+            "summary": result.summary,
+            "error": result.error,
+            "selected_candidate_id": result.metadata.get("selected_candidate_id"),
+            "dispatched": bool(result.metadata.get("dispatched")),
+            "score": output.get("score"),
+            "evaluations": result.metadata.get("evaluations", []),
+            "dispatch_result": output.get("dispatch_result"),
+        }
+        path = self.workspace / "artifacts" / "ac-wm" / "decisions.jsonl"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        except OSError as exc:
+            logger.warning("Failed to record AC-WM decision: {}", exc)
+
+    async def propose_action_candidates(self, task):
+        """Ask the requested low-level skill for a non-executing action preview."""
+        from Emerge.ac_wm.protocol import ActionCandidate, RolloutRequest
+
+        instruction = str(task.input["instruction"])
+        action_type = str(task.input["action_type"])
+        if action_type == "vla_execute":
+            step = int(task.input["step"])
+            proposal_parameters = {"instruction": instruction, "horizon": min(step, _AC_WM_MAX_ROWS),
+                                   "max_execute_steps": step}
+            if "replan_steps" in task.input["parameters"]:
+                proposal_parameters["replan_steps"] = task.input["parameters"]["replan_steps"]
+            raw = await self._dispatch_action("vla_propose", proposal_parameters)
+            marker, skill_name, source = "VLA_PROPOSAL:", "vla", "live_openpi_proposal"
+            candidate_id = f"vla-proposal-{task.task_id[:10]}"
+        else:
+            raw = await self._dispatch_action(
+                "rule_propose", {"skill_action_type": action_type, "parameters": task.input["parameters"]},
+            )
+            marker, skill_name, source = "RULE_PROPOSAL:", f"rule:{action_type}", "rule_controller_preview"
+            candidate_id = f"{action_type}-proposal-{task.task_id[:10]}"
+        if marker not in raw or _VISUAL_MONITOR_MARKER in raw:
+            raise RuntimeError(raw)
+        proposal, _ = json.JSONDecoder().raw_decode(raw.split(marker, 1)[1].lstrip())
+        actions = tuple(tuple(float(value) for value in row) for row in proposal["actions"])
+        metadata = {"execute_steps": int(proposal["execute_steps"]), "source": source,
+                    "action_type": action_type, "observation_revision": proposal.get("observation_revision")}
+        for key in ("control_space", "control_description", "observation_images"):
+            if proposal.get(key):
+                metadata[key] = proposal[key]
+        candidate = ActionCandidate(candidate_id=candidate_id, skill_name=skill_name,
+                                    actions=actions, metadata=metadata)
+        task_description = (
+            instruction + "\nSkill action: " + action_type
+            + "\nParameters: " + json.dumps(task.input["parameters"], ensure_ascii=False)
+        )
+        return RolloutRequest(
+            task=task_description,
+            observation_path=str(proposal["observation_path"]),
+            candidates=(candidate,),
+            domain_name=str(proposal.get("domain_name") or "libero"),
+            output_dir=str(task.input["output_dir"]),
+        )
+
+    async def dispatch_selected_candidate(self, task, selected) -> str:
+        """Execute the exact proposal prefix that the world model evaluated."""
+        execute_steps = max(1, min(int(selected.metadata.get("execute_steps", 1)), len(selected.actions)))
+        parameters = {"actions": [list(row) for row in selected.actions[:execute_steps]],
+                      "candidate_id": selected.candidate_id, "skill_name": selected.skill_name}
+        if selected.metadata.get("control_space"):
+            parameters["control_space"] = selected.metadata["control_space"]
+        return await self._dispatch_action("execute_action_chunk", parameters)
 
     @staticmethod
     def _effective_parameters(
@@ -243,6 +467,12 @@ class EmbodiedActionTool(Tool):
                 + query_count * _WAM_INFERENCE_TIMEOUT_S
                 + step * _WAM_PER_STEP_TIMEOUT_S
             )
+        if action_type == "vla_propose":
+            return _BASE_RESULT_TIMEOUT_S + _PROPOSAL_INFERENCE_TIMEOUT_S
+        if action_type == "execute_action_chunk":
+            rows = parameters.get("actions")
+            count = len(rows) if isinstance(rows, list) else 0
+            return _BASE_RESULT_TIMEOUT_S + count * _VLA_PER_STEP_TIMEOUT_S
         return _BASE_RESULT_TIMEOUT_S
 
     @staticmethod

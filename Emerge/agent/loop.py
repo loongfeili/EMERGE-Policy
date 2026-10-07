@@ -81,6 +81,8 @@ class AgentLoop:
             TaskVerificationSubagentConfig | None
         ) = None,
         visual_monitor_config: VisualMonitorConfig | None = None,
+        ac_wm_rollout=None,
+        ac_wm_judge=None,
     ):
         from Emerge.config.schema import (
             ExecToolConfig,
@@ -125,6 +127,11 @@ class AgentLoop:
                 config=task_verification_config.model_dump(),
             )
         )
+        # AC-WM is installed after the action tool so it can mediate real skill
+        # proposals and dispatch selected controls through that same execution layer.
+        self._ac_wm_rollout = ac_wm_rollout
+        self._ac_wm_judge = ac_wm_judge
+        self.ac_wm_subagent = None
         monitor_config = visual_monitor_config or VisualMonitorConfig()
         self.visual_interrupts = VisualInterruptCoordinator()
         self.visual_monitor = None
@@ -185,7 +192,6 @@ class AgentLoop:
             path_append=self.exec_config.path_append,
         ))
         self.tools.register(MessageTool())
-        self.tools.register(DelegateSubagentTool(self.subagent_registry))
 
         action_tool = EmbodiedActionTool(
             workspace=self.workspace,
@@ -193,6 +199,21 @@ class AgentLoop:
                 self.visual_interrupts if self.visual_monitor is not None else None
             ),
         )
+        if self._ac_wm_rollout is not None and self._ac_wm_judge is not None:
+            from Emerge.ac_wm.register import register_ac_wm
+            self.ac_wm_subagent = register_ac_wm(
+                self.subagent_registry,
+                provider=self.provider,
+                rollout=self._ac_wm_rollout,
+                judge=self._ac_wm_judge,
+                candidate_provider=action_tool.propose_action_candidates,
+                dispatch=action_tool.dispatch_selected_candidate,
+            )
+            action_tool.ac_wm_subagent = self.ac_wm_subagent
+        self.tools.register(DelegateSubagentTool(
+            self.subagent_registry,
+            hidden_agents=("ac-wm",) if self.ac_wm_subagent is not None else (),
+        ))
         self.tools.register(action_tool)
         self.tools.register(SceneGraphQueryTool(workspace=self.workspace))
 
