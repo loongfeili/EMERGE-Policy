@@ -92,22 +92,27 @@ pip install -e .
 
 Python 3.10 or later is required. Robot environments, external model servers, checkpoints, and evaluation dependencies are documented in the repository-level README and the guides under `scripts/`.
 
-## Initialize the workspace
+## First launch
 
-Create the default configuration and workspace:
+Start Emerge directly:
 
 ```bash
-emerge workspace init
+emerge
 ```
 
-This creates:
+On first launch, follow the prompts to select a provider, enter a model ID, and
+configure your API address and credentials. For visual robot tasks, choose a
+model with image input and tool calling.
+
+Default paths:
 
 ```text
 ~/.Emerge/config.json
 ~/.Emerge/workspace/
 ```
 
-Running the command again refreshes the configuration schema and adds missing workspace templates without replacing existing workspace files unless configuration overwrite is explicitly confirmed.
+Use `--config` for a different configuration file or `--workspace` for a different
+workspace.
 
 Inspect the active paths, model, and provider state with:
 
@@ -141,8 +146,6 @@ Configuration files use camelCase keys. A compact configuration looks like this:
   "subagents": {
     "objectLocation": {
       "model": null,
-      "vggtUrl": "ws://localhost:8001",
-      "sam3Url": "ws://localhost:8002",
       "timeout": 120.0,
       "maxIterations": 8
     },
@@ -196,6 +199,110 @@ emerge \
 ```
 
 Type `/` in an empty prompt to open the command palette. Available operations include starting a new session, resuming a saved session, changing the model, stopping a run, checking service health, viewing logs, toggling tool details, inspecting workspace paths, exporting the conversation, and viewing recent run artifacts.
+
+Drag over conversation text to select it; releasing the mouse copies the
+selection. Use the mouse wheel or `PageUp` / `PageDown` to scroll. `Ctrl+C`
+copies selected text; with no selection, it stops the current run or exits.
+Press `Esc` to clear the selection and return to typing.
+
+### Reload the environment with `/reset`
+
+With `robot.controller` running against the same workspace, enter `/reset` in
+Emerge. This also works during a task: Emerge stops the Agent and waits for robot
+action cancellation before asking the controller to close its driver. Once the
+controller confirms it has stopped writing, Emerge clears the task workspace,
+starts a new session with the selected model, and lets the controller recreate
+the environment. Both terminals remain running; the old task is not resumed.
+
+The cleanup matches `/new`: clear `EMBODIED.md`, `ROBOT_STATE.md`, `PLAN.md`,
+`memory/MEMORY.md` and the action queue, then delete and recreate `artifacts/`.
+Session and run history, other memory files, and `.controller/` are retained.
+The new environment installs its profile and publishes fresh state and enabled
+observations. Recordings reuse their configured paths and existing overwrite
+behavior. `/new` continues to clear the workspace without reloading the environment.
+
+If stopping is unconfirmed or the controller does not accept the request, reset
+aborts before cleanup; cancellation flags remain set. If loading fails after
+cleanup, the new session is retained and the error is displayed. Correct the
+driver configuration and enter `/reset` again. While a claimed request's result
+is unconfirmed, Emerge keeps checking that request and blocks new tasks and
+duplicate resets. It never automatically repeats cleanup or loading.
+
+The controller rereads the original `--driver-config` on each reload. For the
+LIBERO driver, the controller workspace also determines where camera artifacts
+are written. Recreating the driver does not reload Python source or clear module
+caches.
+
+### Switch scenes with `/scene`
+
+Configure the scene root and the initial file separately in the driver JSON:
+
+```json
+{
+  "libero": {
+    "bddl_root": "third_party/openpi/third_party/libero/libero/libero/bddl_files",
+    "bddl_file_name": "libero_object/pick_up_the_cream_cheese_and_place_it_in_the_basket.bddl"
+  }
+}
+```
+
+`bddl_file_name` is relative to `bddl_root`. Relative roots are resolved from
+the Controller's working directory. Existing configs without `bddl_root` still
+accept a full BDDL path and use its parent as the browsing root.
+
+With the LIBERO controller running, choose `/scene` from the `/` menu to browse
+`bddl_root`. Type to filter, use the arrow keys to select, and press Enter to
+open a directory or load a `.bddl` file. Select `../` to go up, stopping at the
+configured root; Esc closes the list. The current scene is marked, and selecting
+it leaves the environment as it is. Each new `/scene` starts at the root.
+
+Switching stops the current task and waits for action cancellation, clears the
+task workspace using the cleanup scope above, then loads the selected BDDL and
+starts a new session. The sidebar displays the loaded scene. This is a separate
+operation from `/reset`; it does not edit the driver configuration. If loading
+fails, the environment stays unavailable and `/scene` can select another file
+under the configured root to retry.
+
+Restart both the TUI and Controller once after updating to this version so they
+use the new scene control protocol. Subsequent scene switches keep both running.
+
+## External model services
+
+`/health` discovers self-described services on local ports 8000–8099, including
+OpenPI, Cosmos, VGGT, SAM3, and future models. It shows the actual service name,
+endpoint, and readiness; `/details` also shows the model and instance ID.
+Only the configured local port range is scanned.
+
+Optional configuration (camelCase and snake_case keys are accepted):
+
+```json
+{
+  "modelServices": {
+    "host": "127.0.0.1",
+    "startPort": 8000,
+    "endPort": 8099,
+    "concurrency": 16,
+    "connectTimeout": 0.5,
+    "endpointTimeout": 2,
+    "scanTimeout": 15
+  },
+  "subagents": {
+    "objectLocation": {}
+  }
+}
+```
+
+Discovery selects a unique matching local instance for each requested service;
+multiple matches are reported as an error. The selected endpoint is retained by
+the client, not silently changed after failures. Discovery doesn't rewrite
+configuration. Policy driver configuration accepts an optional `model_id` and a
+`discovery` object using the snake_case discovery settings above.
+
+Public clients and servers must be upgraded together. Old plain-text health
+and old inference messages are not accepted. A timed-out or disconnected
+request isn't automatically replayed: the backend may already have executed it.
+See the [service guide](../scripts/model_server/README.md) and
+[adapter guide](../external_model_server/README.md).
 
 ## Headless runtime
 
@@ -255,7 +362,7 @@ The workspace is the boundary between language-level reasoning and the robot con
 |---|---|
 | `AGENTS.md` | User-maintained instructions for the main agent |
 | `EMBODIED.md` | Active robot capabilities and action conventions |
-| `ROBOT_STATE.md` | Controller-written robot and scene state |
+| `ROBOT_STATE.md` | Controller-written robot runtime state |
 | `PLAN.md` | Agent-maintained task plan and progress |
 | `ACTION.md` | Action queue shared by the agent and controller |
 | `memory/MEMORY.md` | Consolidated long-term memory |
@@ -278,7 +385,6 @@ The main agent registers these tools:
 | `message` | Emit a concise progress message |
 | `delegate_subagent` | Run a registered specialist sub-agent |
 | `execute_robot_action` | Validate, enqueue, monitor, and await a robot action |
-| `query_scene_graph` | Query structured facts from current robot state |
 
 Built-in skills define operating procedures for planning, progress reporting, memory, object localization, task verification, geometric attachment, VLA control, and WAM control. Workspace-local skills can be added under `<workspace>/skills/<name>/SKILL.md`.
 
@@ -345,7 +451,7 @@ Run token usage in `RunResult` currently covers the main agent. Specialist sub-a
 Emerge connects to external services but does not launch them from inside the package:
 
 - The robot or simulator controller consumes `ACTION.md`, writes results, updates `ROBOT_STATE.md`, and publishes observations.
-- The object-location sub-agent connects to VGGT at `ws://localhost:8001` and SAM3 at `ws://localhost:8002` by default.
+- The object-location sub-agent discovers VGGT and SAM3 by their service contracts.
 - VLA and WAM inference are executed by the active controller integration and their model servers.
 
 Use the repository scripts under `scripts/model_server/` and the evaluation guides under `scripts/` to start the required service combination for a task.
@@ -358,23 +464,5 @@ Use the repository scripts under `scripts/model_server/` and the evaluation guid
 - **Provider:** add a `ProviderSpec`, a matching configuration field, and a provider implementation when the LiteLLM adapter is insufficient.
 - **Runtime client:** construct `RunRequest`, call `AgentRuntime.run()`, and consume `RunEvent` callbacks and the final `RunResult`.
 - **Workspace protocol:** add a template and explicitly load or consume it in the context builder, agent tool, or controller.
-
-## Development checks
-
-Run the package tests from the repository root:
-
-```bash
-pytest tests
-```
-
-Useful interface checks:
-
-```bash
-emerge --help
-emerge workspace --help
-python -m Emerge.cli.headless --help
-python -m Emerge.subagents.object_location.main --help
-python -m Emerge.subagents.task_verification.main --help
-```
 
 When this document and the implementation disagree, the current code is authoritative.

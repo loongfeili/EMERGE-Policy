@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from robot.vla.robodojo_policy import encode_observation, unpack_joint_actions
-from robot.vla.openpi_bridge import _parse_server_endpoint
+from robot.vla.robodojo_client import _parse_server_endpoint
 from robot.robodojo_simulation.eval_bridge import DirectAgentTransport, direct_agent_transport
 from robot.robodojo_simulation.action_controller import RoboDojoActionController
 
@@ -92,7 +92,7 @@ def test_openpi_connection_uses_wire_protocol_and_closes():
     import threading
     from websockets.sync.server import serve
     from external_model_server.protocol import pack_message, unpack_message
-    from robot.vla.openpi_bridge import _BoundedPolicyConnection
+    from robot.vla.robodojo_client import _BoundedPolicyConnection
     def handler(ws):
         ws.send(pack_message({'service':'test-policy'}))
         request=unpack_message(ws.recv())

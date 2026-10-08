@@ -65,7 +65,7 @@ def test_recovery_uses_live_pose_and_checks_arrival_with_native_quaternion_order
 
 
 def test_policy_error_is_latched_only_for_its_episode(monkeypatch):
-    from robot.vla.openpi_bridge import Pi05Client
+    from robot.vla.robodojo_client import Pi05Client
     from robot.drivers.robodojo_driver import RoboDojoDriver
     client = Pi05Client('ws://localhost:8000')
     monkeypatch.setattr(client, 'health_check', lambda: True)

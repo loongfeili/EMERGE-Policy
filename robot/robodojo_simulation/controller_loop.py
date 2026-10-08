@@ -14,7 +14,7 @@ def watch_driver_loop(driver, workspace: Path, *, driver_name="robodojo",
                       trajectory_file=None, **_unused):
     state_file = workspace / "ROBOT_STATE.md"
     _install_profile(driver, workspace)
-    driver.load_scene({})
+    driver.load_environment()
     _publish_runtime_state(driver, state_file)
     try:
         while True:

@@ -37,6 +37,19 @@ Tsinghua University · Nanjing University of Science and Technology · Xi'an Jia
 
 ##  What's New
 
+-  **[October 1, 2026]** We release EMERGE-Policy v1.0.0 with a new Web console!
+  Run `emerge web` to manage robot tasks from the browser with live camera views,
+  conversation and task progress, searchable scene selection, and reset and switch
+  controls. Each conversation has an isolated scene and workspace, keeping controller
+  state and artifacts separate while making parallel experiments easier to organize.
+  Guided first-run setup further lowers the setup and day-to-day operation overhead.
+
+-  **[September 24, 2026]** EMERGE-Policy now supports environment reset and scene
+  switching directly from the TUI! Use `/reset` to reload the environment or
+  `/scene` to browse and select a new scene. A unified driver lifecycle interface
+  brings reset and scene selection to new environment integrations, with updated
+  BDDL configuration and LIBERO evaluation support.
+
 -  **[September 16, 2026]** We release the WAM version of EMERGE-Policy! This new
   version integrates Cosmos Policy WAM alongside the original OpenPI VLA version,
   with isolated model servers, multi-worker batched inference, and evaluation on
@@ -54,21 +67,10 @@ Tsinghua University · Nanjing University of Science and Technology · Xi'an Jia
   pipeline, marking the project's first step from a single policy toward
   multi-policy collaboration and continual evolution.
 
-##  Beautiful CLI
 
-EMERGE-Policy includes a polished interactive CLI that brings conversations,
-live plan progress, robot state, observations, service readiness, and run
-artifacts into one terminal workspace. Launch it with the `emerge` command.
-
-<p align="center">
-  <a href="docs/videos/TUI/tui_demo.mp4">
-    <img src="docs/images/cli.png" alt="EMERGE-Policy interactive CLI" width="100%">
-  </a>
-</p>
-
-<p align="center"><em>Click the screenshot to watch the CLI demo.</em></p>
 
 ## Overview
+
 
 Embodied-intelligence research has traditionally pursued a single end-to-end
 model. Long-horizon tasks, however, require frequent low-level perception,
@@ -89,6 +91,42 @@ skills, and our brains plan and imagine. Different heterogeneous organs contribu
 different capabilities, while coherent intelligence arises from their
 collaboration.
 
+## Two Ways to Interact
+
+<p align="center">
+  <strong>One agent runtime, two ways to work.</strong><br>
+  <sub>Both interfaces share the same planning, robot control, and observation tools.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" valign="top" align="center">
+      <h3>Web Interface</h3>
+      <sup><strong>RECOMMENDED</strong></sup><br><br>
+      <a href="fig/web.png">
+        <img src="fig/web.png" alt="EMERGE-Policy Web interface with camera observations and scene management" width="100%">
+      </a>
+      <br><br>
+      <strong>Visual workspace for daily operation</strong><br>
+      <sub>Live camera views · Isolated scenes · Conversation and task progress</sub>
+      <br><br>
+      <code>emerge web</code>
+    </td>
+    <td width="50%" valign="top" align="center">
+      <h3>Terminal Interface</h3>
+      <sup><strong>TUI</strong></sup><br><br>
+      <a href="fig/tui.png">
+        <img src="fig/tui.png" alt="EMERGE-Policy TUI with workspace state and slash commands" width="100%">
+      </a>
+      <br><br>
+      <strong>Focused control without leaving the terminal</strong><br>
+      <sub>Conversations · Plan and robot state · Scene and reset commands</sub>
+      <br><br>
+      <code>emerge</code>
+    </td>
+  </tr>
+</table>
+
 ## Installation
 
 ### 1. Clone the Repository
@@ -102,7 +140,24 @@ git submodule sync --recursive
 git submodule update --init --recursive
 ```
 
-### 2. Install the Main `EmergePolicy` Environment
+### 2. Install the LIBERO-Plus Assets
+
+The LIBERO-Plus Git checkout does not include its large asset bundle. Download
+`assets.zip` from the official
+[Sylvest/LIBERO-plus Hugging Face dataset](https://huggingface.co/datasets/Sylvest/LIBERO-plus)
+and extract it into the checked-out submodule:
+
+```bash
+conda activate base
+python -m pip install --upgrade huggingface_hub
+hf download Sylvest/LIBERO-plus assets.zip \
+  --repo-type dataset \
+  --local-dir /tmp/libero-plus-assets
+unzip -q /tmp/libero-plus-assets/assets.zip \
+  -d third_party/libero_plus/libero/libero
+```
+
+### 3. Install the Main `EmergePolicy` Environment
 
 ```bash
 conda create -n EmergePolicy python=3.12 -y
@@ -110,7 +165,7 @@ conda activate EmergePolicy
 python -m pip install --upgrade pip wheel "setuptools<82"
 
 python -m pip install \
-  -e ".[libero]" \
+  -e ".[libero,web]" \
   -e third_party/vggt \
   -e third_party/sam3 \
   -e third_party/openpi/packages/openpi-client
@@ -118,7 +173,14 @@ python -m pip install \
 bash third_party/imagemagick_env/install.sh
 ```
 
-### 3. Install the Standalone OpenPI Environment `pi05_server`
+Build the Web interface (requires Node.js 22.12+):
+
+```bash
+npm --prefix web install
+npm --prefix web run build
+```
+
+### 4. Install the Standalone OpenPI Environment `pi05_server`
 
 pi05 Policy runs in its own Conda environment; do not install its server
 dependencies into `EmergePolicy`.
@@ -135,7 +197,7 @@ GIT_LFS_SKIP_SMUDGE=1 uv pip install \
 cd ../..
 ```
 
-### 4. Install the Standalone Cosmos Policy Environment `cosmos-policy`
+### 5. Install the Standalone Cosmos Policy Environment `cosmos-policy`
 
 Cosmos Policy runs in its own Conda environment; do not install its server
 dependencies into `EmergePolicy`.
@@ -157,38 +219,13 @@ cd ../..
 
 ## Quick Start
 
-The Python package is named `Emerge`, and the installed command-line entry point
-is `emerge`. The default configuration file is `~/.Emerge/config.json`, and the
-default workspace is `~/.Emerge/workspace`.
+Run from the repository root with `conda activate EmergePolicy`. Start the model
+services, then choose **Web (recommended)**, **TUI**, or **Headless** below.
 
-Initialize the configuration and workspace before the first run:
+### Start Model Services
 
-```bash
-emerge workspace init
-```
 
-This creates `~/.Emerge/config.json`, initializes `~/.Emerge/workspace`, and
-installs the bundled workspace templates. Add the required provider credentials
-to the generated configuration before launching the agent.
-
-Start the Controller in one terminal:
-
-```bash
-python -m robot.controller \
-  --driver libero_mujoco \
-  --driver-config dev/libero_mujoco_driver_sample.json
-```
-
-Run the agent CLI in another terminal:
-
-```bash
-emerge
-```
-
-Choose one policy backend and start it together with the shared VGGT and SAM3
-perception services. The launcher, standard LIBERO evaluation, and LIBERO-Plus
-evaluation default to WAM. LIBERO-Pro supports VLA only.
-For the OpenPI VLA backend (use `--policy-backend vla` for evaluation):
+For OpenPI VLA:
 
 ```bash
 OPENPI_GPU=0 \
@@ -206,15 +243,45 @@ SAM3_GPU=2 \
 bash scripts/model_server/start_external_model_servers.sh --services cosmos,vggt,sam3
 ```
 
-The launcher uses the `cosmos-policy` environment and the default paths under
-`checkpoints/cosmos-policy/`; VGGT and SAM3 continue to use `EmergePolicy`.
-Check readiness from another terminal:
+### Web (Recommended)
 
 ```bash
-curl http://127.0.0.1:8003/healthz
-curl http://127.0.0.1:8001/healthz
-curl http://127.0.0.1:8002/healthz
+emerge web
 ```
+
+Open **http://127.0.0.1:8080/**. The first launch guides you through API setup.
+Create a conversation to start a scene; Web manages its Controller and isolated
+workspace automatically. See the [Web guide](web/README.md) for more options.
+
+### TUI
+
+Start the Controller in one terminal:
+
+```bash
+python -m robot.controller \
+  --driver libero_mujoco \
+  --driver-config dev/libero_mujoco_driver_sample.json
+```
+
+Launch the terminal interface in another terminal. The first launch guides you
+through API setup:
+
+```bash
+emerge
+```
+
+### Headless
+
+For scripts and evaluations, configure your API through Web or TUI first, then
+start the Controller as above and run a single task:
+
+```bash
+python -m Emerge.cli.headless "Put the red block in the basket"
+```
+
+The result is written to stdout as JSON. TUI and Headless use
+`~/.Emerge/workspace` by default. See the [headless guide](Emerge/README.md#headless-runtime)
+for request files and runtime options.
 
 ## Model Checkpoints
 
@@ -235,7 +302,7 @@ loading independent from individual agent episodes.
 
 | Service | Port | Environment | Purpose |
 |---|---:|---|---|
-| OpenPI | 8000 | `pi05_server` | VLA action inference |
+| OpenPI | 8000 | `pi05_server` | VLA policy inference through the shared runtime |
 | VGGT | 8001 | `EmergePolicy` | Multi-view geometry estimation |
 | SAM3 | 8002 | `EmergePolicy` | Prompt-guided image segmentation |
 | Cosmos Policy | 8003 | `cosmos-policy` | WAM candidate action generation and scoring |

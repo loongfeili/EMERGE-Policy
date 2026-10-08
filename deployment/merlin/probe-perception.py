@@ -7,8 +7,10 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from Emerge.subagents.object_location.tools.location.client import ModelServerClient
 from Emerge.subagents.object_location.tools.location.pose import estimate_object_locations
+from external_model_server.model_service.client import AsyncModelClient
+from external_model_server.model_service.discovery import PinnedDiscovery
+from external_model_server.schemas import SAM3, VGGT
 from perception_probe_checks import quality_rejection
 
 SETUP = Path('/home/tiger/robodojo-setup')
@@ -38,7 +40,9 @@ async def probe(workspace, services, *, reference):
         url = services[name + '_urls'][0]
         started = time.monotonic()
         try:
-            result = await ModelServerClient(url, timeout=180).infer(payload)
+            expectation = VGGT if name == 'vggt' else SAM3
+            async with AsyncModelClient(expectation, timeout=180, discovery=PinnedDiscovery({name: url})) as client:
+                result = await client.infer(payload)
         except RuntimeError as error:
             rejection = quality_rejection(error, url) if name == 'vggt' else None
             if reference or rejection is None:

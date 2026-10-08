@@ -1,0 +1,166 @@
+"""RoboDojo's client for an OpenPI websocket policy server addressed by URL.
+
+RoboDojo serves its 14-dim dual-arm Pi0.5 through
+``external_model_server.openpi_batch_server``, which speaks OpenPI's native
+websocket protocol. LIBERO uses ``robot.vla.openpi_bridge`` and the shared
+model-service protocol instead; the two are not wire compatible.
+
+Importing this module does not import ``openpi`` or ``openpi_client``. The
+connection is made on the first inference, so the lightweight controller
+modules remain importable without the OpenPI runtime.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import inspect
+from typing import Any
+import urllib.parse
+import urllib.request
+
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_SERVER_URL = "ws://localhost:8000"
+_DEFAULT_SERVER_PORT = 8000
+
+
+def _parse_server_endpoint(server_url: str) -> tuple[str, int, str]:
+    """Resolve a server URL into ``(host, port, http_base)``."""
+    raw = str(server_url or _DEFAULT_SERVER_URL).strip()
+    if not raw:
+        raw = _DEFAULT_SERVER_URL
+    if "://" not in raw:
+        raw = f"ws://{raw}"
+
+    parsed = urllib.parse.urlparse(raw)
+    host = parsed.hostname or "localhost"
+    port = int(parsed.port or _DEFAULT_SERVER_PORT)
+    http_scheme = "https" if parsed.scheme in {"https", "wss"} else "http"
+    authority = f"[{host}]" if ":" in host else host
+    return host, port, f"{http_scheme}://{authority}:{port}"
+
+
+class Pi05Client:
+    """Lazy wrapper around ``openpi_client.WebsocketClientPolicy``."""
+
+    def __init__(
+        self,
+        server_url: str = _DEFAULT_SERVER_URL,
+        *,
+        timeout: float = 120.0,
+    ) -> None:
+        self._host, self._port, self._http_base = _parse_server_endpoint(
+            server_url
+        )
+        self._timeout = float(timeout)
+        self._client: Any | None = None
+        self.last_error: str | None = None
+
+    def begin_episode(self) -> None:
+        """Clear the previous episode's error latch without dropping a healthy connection.
+
+        Errors remain latched across successful retries within an episode so the
+        evaluator can account for that episode's infrastructure failure.
+        """
+        self.last_error = None
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    def health_check(self) -> bool:
+        """Return whether the OpenPI server responds on ``/healthz``."""
+        timeout_s = min(max(self._timeout, 0.1), 2.0)
+        url = f"{self._http_base}/healthz"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(
+                urllib.request.Request(url),
+                timeout=timeout_s,
+            ) as response:
+                return response.status == 200
+        except Exception as error:
+            logger.warning(
+                "OpenPI health check failed for %s: %s: %s",
+                url,
+                type(error).__name__,
+                error,
+            )
+            return False
+
+    def infer(self, element: dict[str, Any]) -> dict[str, Any]:
+        """Run one policy inference and normalize its action array."""
+        if self._client is None and not self.health_check():
+            self.last_error = f"OpenPI policy server is unavailable at {self._http_base}"
+            raise RuntimeError(self.last_error)
+
+        try:
+            result = self._ensure_client().infer(element)
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            self.close()
+            raise
+        if "actions" in result:
+            import numpy as np
+
+            if not isinstance(result["actions"], np.ndarray):
+                result["actions"] = np.asarray(
+                    result["actions"],
+                    dtype=np.float32,
+                )
+        return result
+
+    def close(self) -> None:
+        """Release the lazy websocket client reference."""
+        if self._client is not None:
+            self._client.close()
+        self._client = None
+
+    def _ensure_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+
+        for env_name in ("NO_PROXY", "no_proxy"):
+            current = os.environ.get(env_name, "")
+            hosts = {item.strip() for item in current.split(",") if item.strip()}
+            hosts.update({"localhost", "127.0.0.1", "::1", self._host})
+            os.environ[env_name] = ",".join(sorted(hosts))
+
+        self._client = _BoundedPolicyConnection(self._host, self._port, self._timeout)
+        return self._client
+
+
+class _BoundedPolicyConnection:
+    """Same binary OpenPI protocol, with bounded handshake and inference waits."""
+    def __init__(self, host: str, port: int, timeout: float):
+        from websockets.sync.client import connect
+        from external_model_server.protocol import unpack_message
+
+        authority = f"[{host}]" if ":" in host else host
+        options = dict(compression=None, max_size=None, open_timeout=timeout)
+        if "proxy" in inspect.signature(connect).parameters:
+            options["proxy"] = None
+        self._timeout = timeout
+        self._socket = connect(f"ws://{authority}:{port}", **options)
+        try:
+            self.metadata = unpack_message(self._socket.recv(timeout=timeout))
+        except BaseException:
+            self._socket.close()
+            raise
+
+    def infer(self, observation):
+        from external_model_server.protocol import pack_message, unpack_message
+        self._socket.send(pack_message(observation))
+        response = self._socket.recv(timeout=self._timeout)
+        if isinstance(response, str):
+            raise RuntimeError(f"OpenPI inference error: {response}")
+        return unpack_message(response)
+
+    def close(self):
+        self._socket.close()

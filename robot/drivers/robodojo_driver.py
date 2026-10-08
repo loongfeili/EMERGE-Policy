@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from robot.drivers.base_driver import BaseDriver, CancelCheck
+from robot.drivers.base_driver import BaseDriver, CancelCheck, SceneCatalog
 from robot.robodojo_simulation.action_controller import RoboDojoActionController
 from robot.robodojo_simulation.tensors import to_float_array
 
@@ -66,12 +66,28 @@ class RoboDojoDriver(BaseDriver):
         profiles = Path(__file__).resolve().parents[1] / "profiles"
         return profiles / "robodojo.md"
 
-    def load_scene(self, scene: dict[str, dict]) -> None:
+    def load_environment(self) -> None:
         # The canonical RoboDojo task/layout has already been constructed by
         # the Isaac worker. ROBOT_STATE.md is a view of it, not its source.
-        _ = scene
         # Give the agent a view of the scene before it plans its first action.
         self._publish_observation()
+
+    def reset_environment(self) -> None:
+        raise RuntimeError(
+            "RoboDojo layouts are reset by the evaluation worker, which owns the "
+            "Isaac environment; the driver cannot reset them"
+        )
+
+    def get_scene_catalog(self) -> SceneCatalog:
+        # The evaluation worker fixes the task and layout for each episode.
+        task = str(getattr(self._environment, "task_name", "")) or None
+        return {"root": "RoboDojo", "current": task if self.is_connected() else None, "entries": []}
+
+    def switch_scene(self, scene_id: str) -> None:
+        raise ValueError(
+            f"RoboDojo scene {scene_id!r} cannot be selected here; tasks and "
+            "layouts are chosen by the evaluation worker"
+        )
 
     def execute_action(
         self,

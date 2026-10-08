@@ -173,7 +173,7 @@ from robot.mujoco_simulation.scene_io import (
     save_robot_state_doc,
 )
 from robot.robodojo_simulation.isaacsim_compat import apply_isaacsim_compat, select_planner_device
-from robot.vla.openpi_bridge import Pi05Client
+from robot.vla.robodojo_client import Pi05Client
 
 
 def _build_config(layout_ids: list[int] | None = None) -> Any:

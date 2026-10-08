@@ -15,7 +15,7 @@ while True:
 import json,time,concurrent.futures
 from pathlib import Path
 import numpy as np
-from robot.vla.openpi_bridge import Pi05Client
+from robot.vla.robodojo_client import Pi05Client
 from external_model_server.protocol import unpack_message
 obs=unpack_message(Path('/home/tiger/emerge-smoke-bulk25/policy_observation.msgpack').read_bytes())
 url=_services['policy_urls'][0]

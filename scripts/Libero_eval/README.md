@@ -2,6 +2,13 @@
 
 Run all commands from the repository root.
 
+Episode driver configs use `libero.bddl_root` plus a relative
+`libero.bddl_file_name`. The evaluator fills both from the selected benchmark
+task, so the base evaluation JSON does not need a fixed scene. LIBERO-Plus and
+LIBERO-Pro share this config writer; Plus virtual filenames retain their
+parameter suffixes, and Pro resolves each suite's actual data root, including
+generated Environment data exposed through symlinks.
+
 ## 1. Start services (terminal 1)
 
 ### WAM (default)
@@ -107,8 +114,6 @@ task selection, and output directory.
 | `--task-ids` | `0`, `0,2,3`, `2-5`, or `all` |
 | `--trials-per-task` | Trials per task |
 | `--workers` | Concurrent environments |
-| `--vla-server-url` | OpenPI URL; default `ws://localhost:8000` |
-| `--wam-server-url` | Cosmos URL; default `ws://127.0.0.1:8003` |
 | `--wam-conditioning-mode` | `task` (default), `phase`, or `task_with_phase` |
 | `--profile-path` | Custom profile |
 | `--max-steps` | Maximum action steps per episode |

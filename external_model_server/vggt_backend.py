@@ -11,6 +11,7 @@ import torch
 from vggt.models.vggt import VGGT
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
+from external_model_server.model_service.contracts import ServiceError
 from external_model_server.localization_types import (
     VGGTAlignedCamera,
     VGGTAlignment,
@@ -29,6 +30,10 @@ class VGGTBackend:
         self.config = dict(config or {})
         self._model: Any | None = None
         self._device: str | None = None
+
+    def close(self) -> None:
+        self._model = None
+        self._device = None
 
     def infer(
         self,
@@ -215,7 +220,7 @@ class VGGTBackend:
             point_map_world = self._unproject_depth_to_world(
                 view_depth_m,
                 intrinsics=intrinsics_observed,
-                T_world_camera=np.asarray(view.T_world_camera, dtype=np.float64),
+                t_world_camera=np.asarray(view.T_world_camera, dtype=np.float64),
             )
             view_depth_conf = (
                 None
@@ -420,8 +425,11 @@ class VGGTBackend:
         max_relative_mad = float(
             self.config.get("max_baseline_scale_relative_mad", 0.25)
         )
+        # Typed so the model service returns the reason instead of a generic
+        # inference failure; callers treat it as a scene rejection, not an outage.
         if alignment.baseline_scale_relative_mad > max_relative_mad:
-            raise RuntimeError(
+            raise ServiceError(
+                "GEOMETRY_REJECTED",
                 "VGGT camera baselines disagree on metric depth scale: "
                 f"relative_mad={alignment.baseline_scale_relative_mad:.4f}, "
                 f"limit={max_relative_mad:.4f}"
@@ -430,7 +438,8 @@ class VGGTBackend:
             self.config.get("max_camera_center_rms_error_m", 0.10)
         )
         if alignment.rms_camera_center_error_m > max_center_rms:
-            raise RuntimeError(
+            raise ServiceError(
+                "GEOMETRY_REJECTED",
                 "VGGT predicted camera geometry is inconsistent with calibration: "
                 f"rms={alignment.rms_camera_center_error_m:.4f}m, "
                 f"limit={max_center_rms:.4f}m"
@@ -441,7 +450,7 @@ class VGGTBackend:
         depth_m: np.ndarray,
         *,
         intrinsics: np.ndarray,
-        T_world_camera: np.ndarray,
+        t_world_camera: np.ndarray,
     ) -> np.ndarray:
         depth_m = np.asarray(depth_m, dtype=np.float64)
         if depth_m.ndim != 2:
@@ -449,7 +458,7 @@ class VGGTBackend:
                 f"metric depth must have shape HxW, got {depth_m.shape}"
             )
         intrinsics = np.asarray(intrinsics, dtype=np.float64)
-        transform = np.asarray(T_world_camera, dtype=np.float64)
+        transform = np.asarray(t_world_camera, dtype=np.float64)
         height, width = depth_m.shape
         pixel_y, pixel_x = np.indices((height, width), dtype=np.float64)
         camera_x = (

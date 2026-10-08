@@ -8,29 +8,29 @@ import os
 import re
 import sys
 import time
-from uuid import uuid4
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
+from uuid import uuid4
 
 from loguru import logger
 
 from Emerge.agent.context import ContextBuilder
+from Emerge.agent.memory import MemoryConsolidator
+from Emerge.agent.tools.delegate import DelegateSubagentTool
+from Emerge.agent.tools.embodied import EmbodiedActionTool
+from Emerge.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from Emerge.agent.tools.message import MessageTool
+from Emerge.agent.tools.shell import ExecTool
+from Emerge.agent.tools.update_plan import UpdatePlanTool
 from Emerge.agent.visual_monitor import (
     VisualInterruptCoordinator,
     VisualMonitor,
 )
-from Emerge.agent.tools.delegate import DelegateSubagentTool
-from Emerge.agent.memory import MemoryConsolidator
-from Emerge.agent.tools.embodied import EmbodiedActionTool
-from Emerge.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
-from Emerge.agent.tools.message import MessageTool
 from Emerge.base import ToolRegistry
-from Emerge.agent.tools.scene_graph import SceneGraphQueryTool
-from Emerge.agent.tools.shell import ExecTool
-from Emerge.agent.tools.update_plan import UpdatePlanTool
 from Emerge.bus.events import InboundMessage, OutboundMessage
 from Emerge.bus.queue import MessageBus
 from Emerge.providers.base import LLMProvider
+from Emerge.session.manager import Session, SessionManager
 from Emerge.subagents import SubagentRegistry
 from Emerge.subagents.object_location import (
     build_object_location_subagent,
@@ -38,7 +38,6 @@ from Emerge.subagents.object_location import (
 from Emerge.subagents.task_verification import (
     build_task_verification_subagent,
 )
-from Emerge.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
     from Emerge.config.schema import (
@@ -81,6 +80,7 @@ class AgentLoop:
             TaskVerificationSubagentConfig | None
         ) = None,
         visual_monitor_config: VisualMonitorConfig | None = None,
+        model_services_config=None,
         ac_wm_rollout=None,
         ac_wm_judge=None,
     ):
@@ -113,6 +113,7 @@ class AgentLoop:
                 workspace=workspace,
                 model=object_location_config.model or self.model,
                 config=object_location_config.model_dump(),
+                discovery=object_location_config.discovery(model_services_config),
             )
         )
         task_verification_config = (
@@ -215,7 +216,6 @@ class AgentLoop:
             hidden_agents=("ac-wm",) if self.ac_wm_subagent is not None else (),
         ))
         self.tools.register(action_tool)
-        self.tools.register(SceneGraphQueryTool(workspace=self.workspace))
 
     def _emit(self, kind: str, data: dict) -> None:
         if self.on_event is not None:

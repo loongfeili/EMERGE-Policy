@@ -6,11 +6,15 @@ import re
 def quality_rejection(error, server_url):
     if not isinstance(error, RuntimeError):
         return None
+    # Model-service errors carry a code; the legacy client prefixed the server.
     prefix = f"RuntimeError from {server_url}: "
     message = str(error)
-    if not message.startswith(prefix):
+    if getattr(error, "code", None) == "GEOMETRY_REJECTED":
+        pass
+    elif message.startswith(prefix):
+        message = message[len(prefix):]
+    else:
         return None
-    message = message[len(prefix):]
     patterns = [
         ("baseline_scale_relative_mad", r"VGGT camera baselines disagree on metric depth scale: relative_mad=([0-9]+(?:\.[0-9]+)?), limit=([0-9]+(?:\.[0-9]+)?)"),
         ("camera_center_rms_m", r"VGGT predicted camera geometry is inconsistent with calibration: rms=([0-9]+(?:\.[0-9]+)?)m, limit=([0-9]+(?:\.[0-9]+)?)m"),

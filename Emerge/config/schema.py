@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -42,12 +42,31 @@ class AgentsConfig(Base):
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
 
 
+class ModelServicesConfig(Base):
+    """Local model-service discovery settings."""
+
+    host: str = "127.0.0.1"
+    start_port: int = 8000
+    end_port: int = 8099
+    concurrency: int = 16
+    connect_timeout: float = 0.5
+    endpoint_timeout: float = 2
+    scan_timeout: float = 15
+
+    def discovery_config(self):
+        from external_model_server.model_service.discovery import DiscoveryConfig
+        return DiscoveryConfig(**self.model_dump())
+
+    @model_validator(mode="after")
+    def validate_discovery(self):
+        self.discovery_config()
+        return self
+
+
 class ObjectLocationSubagentConfig(Base):
     """Runtime settings for the Object Location Subagent."""
 
     model: str | None = None
-    vggt_url: str = "ws://localhost:8001"
-    sam3_url: str = "ws://localhost:8002"
     timeout: float = 120.0
     max_iterations: int = 8
     point_conf_threshold: float = 0.3
@@ -56,6 +75,15 @@ class ObjectLocationSubagentConfig(Base):
     view_center_tolerance_m: float = Field(default=0.08, gt=0.0)
     ray_consensus_tolerance_m: float = Field(default=0.02, gt=0.0)
     min_consistent_views: int = Field(default=2, ge=1)
+    # Pinned model-service endpoints for hosts the loopback scan cannot reach.
+    vggt_url: str | None = None
+    sam3_url: str | None = None
+
+    def discovery(self, services: ModelServicesConfig | None = None):
+        from external_model_server.model_service.discovery import PinnedDiscovery
+
+        config = (services or ModelServicesConfig()).discovery_config()
+        return PinnedDiscovery({"vggt": self.vggt_url, "sam3": self.sam3_url}, config)
 
 
 class TaskVerificationSubagentConfig(Base):
@@ -145,6 +173,11 @@ class Config(BaseSettings):
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     visual_monitor: VisualMonitorConfig = Field(default_factory=VisualMonitorConfig)
+    model_services: ModelServicesConfig = Field(
+        default_factory=ModelServicesConfig,
+        validation_alias=AliasChoices("model_services", "modelServices"),
+        serialization_alias="modelServices",
+    )
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
