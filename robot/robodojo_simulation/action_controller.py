@@ -30,6 +30,7 @@ from robot.robodojo_simulation.trajectory_preview import (
     draw_camera_overlay,
     draw_plan_schematic,
     quaternion_xyzw_matrix,
+    remount_camera,
 )
 from robot.vla.robodojo_policy import ACTION_DIM, encode_observation, unpack_joint_actions
 
@@ -131,6 +132,7 @@ class RoboDojoActionController:
         )
         self._cancel_check: Callable[[], str | None] | None = None
         self._kinematic_chains: dict[str, tuple[UrdfChain, tuple[str, ...]]] = {}
+        self._wrist_mounts: dict[str, np.ndarray] = {}
 
     def execute(
         self,
@@ -651,8 +653,11 @@ class RoboDojoActionController:
         try:
             preview = self._trajectory_preview(rows, control_space, execute_steps)
             for view in views:
-                if view.intrinsics is not None and view.t_env_camera is not None:
-                    annotated[view.name] = draw_camera_overlay(view.rgb, view.intrinsics, view.t_env_camera, preview)
+                arm = self._wrist_arm(view.name)
+                transform = self._live_camera_pose(view, arm)
+                if view.intrinsics is not None and transform is not None:
+                    caption = f"{arm} wrist camera, moves with the {arm} gripper" if arm else None
+                    annotated[view.name] = draw_camera_overlay(view.rgb, view.intrinsics, transform, preview, caption)
             panels.append(("plan_schematic", draw_plan_schematic(preview)))
             payload["preview"] = preview.to_json()
         except Exception as exc:
@@ -688,6 +693,43 @@ class RoboDojoActionController:
             tcp = [frame[:3, 3] + frame[:3, 0] * bias for frame in [now, *flanges]]
             arms[arm] = ArmPath(np.asarray(tcp), np.concatenate(([self._current_gripper(arm)], grippers)))
         return TrajectoryPreview(arms, int(execute_steps))
+
+    @staticmethod
+    def _wrist_arm(camera_name: str) -> str | None:
+        if "wrist" not in camera_name:
+            return None
+        return next((arm for arm in _ARM_NAMES if f"_{arm}_" in f"_{camera_name}_"), None)
+
+    def _live_camera_pose(self, view: Any, arm: str | None) -> np.ndarray | None:
+        """``T_env_camera`` at the moment the frame was rendered; None when unknown."""
+        if view.t_env_camera is None or arm is None:
+            return view.t_env_camera
+        try:
+            chain, names = self._kinematic_chain(arm)
+            robot = self._robot(arm)
+            position, orientation = self._current_pose_xyzw(arm)
+            flange = _pose_matrix(position, orientation)
+            current = to_float_array(
+                self._environment.robot_manager.get_joint(robot, env_idx_list=[0])[0]
+            ).reshape(-1)
+            base = flange @ np.linalg.inv(chain.forward(dict(zip(names, current))))
+            spawn = base @ chain.forward(dict.fromkeys(names, 0.0))
+            pose = remount_camera(view.t_env_camera, flange, spawn, self._wrist_mount_translation(arm))
+        except (RuntimeError, ValueError) as exc:
+            print(f"[robodojo] AC-WM {view.name} calibration unavailable: {exc}", flush=True)
+            return None
+        if pose is None:
+            print(f"[robodojo] AC-WM {view.name} pose does not match its URDF mount; path not drawn", flush=True)
+        return pose
+
+    def _wrist_mount_translation(self, arm: str) -> np.ndarray:
+        if arm not in self._wrist_mounts:
+            robot = self._robot(arm)
+            link = next((str(camera.get("link")) for camera in getattr(robot, "camera", None) or ()
+                         if str(camera.get("name", "")).endswith("_wrist") and camera.get("link")), "camera")
+            mount = UrdfChain.from_urdf(robot.urdf_path, robot.ee_link_name, link).forward({})
+            self._wrist_mounts[arm] = mount[:3, 3]
+        return self._wrist_mounts[arm]
 
     def _kinematic_chain(self, arm: str) -> tuple[UrdfChain, tuple[str, ...]]:
         if arm not in self._kinematic_chains:

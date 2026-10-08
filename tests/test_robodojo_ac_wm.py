@@ -69,7 +69,8 @@ class Cell:
         robots = {arm: SimpleNamespace(arm=arm, gripper_scale=[0., .044], gripper_move={'sign': 1},
                                        urdf_path=str(urdf_path) if urdf_path else None, base_link='base_link',
                                        ee_link_name='link6', gripper_bias=0.145,
-                                       arm_joints_name=[f'joint{i}' for i in range(1, 7)])
+                                       arm_joints_name=[f'joint{i}' for i in range(1, 7)],
+                                       camera=[{'link': 'camera', 'name': 'cam_wrist'}])
                   for arm in ARMS}
         manager = SimpleNamespace(
             get_robot_by_arm_name=lambda name: robots[name.removesuffix('_arm')],
@@ -84,10 +85,27 @@ class Cell:
         self.published = []
         intrinsics, transform = top_down_camera() if calibrated else (None, None)
         frame = np.full((120, 160, 3), 120, np.uint8)
+        # Like Isaac, wrist cameras are reported where they spawned (all joints
+        # zero), not where the rendered frame was taken.
+        self.wrist_mount = None
+        self.wrist_reported = {}
+        if urdf and calibrated:
+            from robot.robodojo_simulation.trajectory_preview import UrdfChain
+
+            chain = UrdfChain.from_urdf(urdf_path, 'base_link', 'link6')
+            self.wrist_mount = UrdfChain.from_urdf(urdf_path, 'link6', 'camera').forward({})
+            self.wrist_mount[:3, :3] = self.wrist_mount[:3, :3] @ np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0.]])
+            for arm in ARMS:
+                flange = np.eye(4)
+                flange[:3, 3] = self.poses[arm][:3]
+                base = flange @ np.linalg.inv(chain.forward(dict(zip(chain.movable_joints, self.joints[arm]))))
+                self.wrist_reported[arm] = base @ chain.forward(dict.fromkeys(chain.movable_joints, 0.)) @ self.wrist_mount
 
         def views(observation=None):
             self.view_requests.append(observation)
-            return [AcWmView('cam_head', frame, intrinsics, transform)]
+            return [AcWmView('cam_head', frame, intrinsics, transform)] + [
+                AcWmView(f'cam_{arm}_wrist', frame, intrinsics if arm in self.wrist_reported else None,
+                         self.wrist_reported.get(arm)) for arm in ARMS]
 
         def snapshot(views, *, annotated=None, panels=()):
             self.snapshot_calls.append({'annotated': dict(annotated or {}), 'panels': list(panels)})
@@ -139,7 +157,8 @@ def test_move_linear_preview_is_ee16_and_holds_the_other_arm(tmp_path):
     np.testing.assert_allclose(left[4], [.245, -.2, .88], atol=1e-4)
     right = np.asarray(proposal['preview']['arms']['right']['tcp'])
     np.testing.assert_allclose(right, np.tile([.245, -.2, .8], (len(right), 1)), atol=1e-4)
-    assert [Path(path).name for path in proposal['preview_images']] == ['cam_head_plan.png', 'plan_schematic.png']
+    assert [Path(path).name for path in proposal['preview_images']] == [
+        'cam_head_plan.png', 'cam_left_wrist_plan.png', 'cam_right_wrist_plan.png', 'plan_schematic.png']
     assert all(Path(path).is_file() for path in proposal['preview_images'])
 
 
@@ -295,6 +314,64 @@ def test_preview_failure_keeps_the_proposal_executable(tmp_path, monkeypatch):
     assert [Path(path).name for path in proposal['preview_images']] == ['plan_schematic.png']
 
 
+def test_wrist_paths_are_drawn_from_the_live_wrist_camera_pose(tmp_path, monkeypatch):
+    cell = Cell(tmp_path)
+    drawn = {}
+
+    def capture(rgb, intrinsics, transform, preview, caption=None):
+        drawn[caption] = transform
+        return rgb
+
+    monkeypatch.setattr(controller_module, 'draw_camera_overlay', capture)
+    cell.controller().execute('rule_propose', {
+        'skill_action_type': 'move_linear', 'parameters': {'arm': 'right', 'delta_m': [0, .05, 0], 'steps': 2}})
+    head, _ = top_down_camera()[1], None
+    np.testing.assert_allclose(drawn[None], head)
+    for arm in ARMS:
+        flange = np.eye(4)
+        flange[:3, 3] = cell.poses[arm][:3]
+        live = drawn[f'{arm} wrist camera, moves with the {arm} gripper']
+        np.testing.assert_allclose(live, flange @ cell.wrist_mount, atol=1e-9)
+        assert not np.allclose(live, cell.wrist_reported[arm])
+
+    # A pose matching neither the live nor the spawn mount is not trusted.
+    drawn.clear()
+    cell.wrist_reported['left'] = np.eye(4)
+    cell.controller().execute('rule_propose', {
+        'skill_action_type': 'move_linear', 'parameters': {'arm': 'right', 'delta_m': [0, .05, 0], 'steps': 2}})
+    assert 'left wrist camera, moves with the left gripper' not in drawn
+    assert 'right wrist camera, moves with the right gripper' in drawn
+
+
+def test_x5_wrist_camera_is_remounted_from_its_spawn_pose():
+    """Isaac reported this right-wrist pose (all-joints-zero spawn) while the arm was elsewhere."""
+    from robot.robodojo_simulation.trajectory_preview import (
+        UrdfChain, project, quaternion_xyzw_matrix, remount_camera)
+
+    urdf = ROOT.parent / 'RoboDojo/Assets/Robots/x5/X5A.urdf'
+    if not urdf.is_file():
+        pytest.skip('RoboDojo X5 assets are not checked out next to this repository')
+    chain = UrdfChain.from_urdf(urdf, 'base_link', 'link6')
+    names = chain.movable_joints
+    flange = np.eye(4)
+    flange[:3, :3] = quaternion_xyzw_matrix([-0.0065956, 0.0100771, 0.7188910, 0.6950184])
+    flange[:3, 3] = [0.2883531, -0.3509277, 1.0299857]
+    joints = [0.1576875, 0.3017553, 0.4360950, -0.1580132, 0.1241260, 0.0082538]
+    base = flange @ np.linalg.inv(chain.forward(dict(zip(names, joints))))
+    spawn = base @ chain.forward(dict.fromkeys(names, 0.))
+    reported = np.array([[1.0, 0.000147, -0.000255, 0.300445], [0.000295, -0.500029, 0.866008, -0.267458],
+                         [0.0, -0.866008, -0.500029, 0.97244], [0, 0, 0, 1]])
+    mount = UrdfChain.from_urdf(urdf, 'link6', 'camera').forward({})[:3, 3]
+    assert remount_camera(reported, flange, flange, mount) is None
+    live = remount_camera(reported, flange, spawn, mount)
+    intrinsics = np.array([[397.04126, 0, 320], [0, 397.04126, 240], [0, 0, 1]])
+    tcp = flange[:3, 3] + flange[:3, 0] * 0.145
+    pixel, visible = project(tcp[None], intrinsics, live)
+    # The fingertip centre sits between the jaws, just below the image centre.
+    assert visible[0]
+    np.testing.assert_allclose(pixel[0], [320, 312], atol=3)
+
+
 def test_x5_urdf_forward_kinematics_matches_isaac():
     """Joint state and link6 pose recorded together from a RoboDojo episode."""
     from robot.robodojo_simulation.trajectory_preview import UrdfChain, quaternion_xyzw_matrix
@@ -352,6 +429,16 @@ def test_judge_describes_fingertip_displacements_instead_of_joint_angles():
     candidate = ActionCandidate('c', 'vla', ((0.123456,) * 14,) * 3, {'preview': preview})
     prompt = build_judge_prompt('reach', candidate, RolloutResult('c', 'success', metadata={'prediction': 'none'}))
     assert '0.123456' not in prompt and 'planned gripper path is drawn' in prompt
+    assert 'wrist view' in prompt
+
+
+def test_judge_names_each_camera_view():
+    from Emerge.ac_wm.vlm_judge import _view_label
+
+    assert _view_label('cam_left_wrist_plan') == (
+        'cam_left_wrist camera (on the left gripper, close-range view) with the planned gripper paths drawn')
+    assert _view_label('cam_head_plan') == 'cam_head camera (fixed overview) with the planned gripper paths drawn'
+    assert _view_label('cam_right_wrist') == 'cam_right_wrist camera (on the right gripper, close-range view)'
 
 
 def test_publisher_snapshot_reuses_the_latest_frames(tmp_path):
@@ -493,8 +580,12 @@ def test_robodojo_actions_flow_through_ac_wm_end_to_end(tmp_path, monkeypatch):
     assert len(cell.actions) - moved == 20
     _, candidate, rollout = judged[-1]
     assert candidate.metadata['control_space'] == 'robodojo_joint14'
-    # The judge gets the drawn fingertip paths, never the joint rows.
-    assert [Path(frame).name for frame in rollout.metadata['frames']] == ['cam_head_plan.png', 'plan_schematic.png']
+    # The judge gets the drawn fingertip paths, never the joint rows. (This
+    # model moves joints and flange poses independently, so wrist poses stop
+    # matching their mount and are rightly left undrawn here.)
+    frames = [Path(frame).name for frame in rollout.metadata['frames']]
+    assert frames[0] == 'cam_head_plan.png' and frames[-1] == 'plan_schematic.png'
+    assert all(name.endswith('_plan.png') or name == 'plan_schematic.png' for name in frames)
     from Emerge.ac_wm.vlm_judge import build_judge_prompt
     prompt = build_judge_prompt('stack', candidate, rollout)
     assert 'gripper fingertip centre' in prompt and 'Candidate controls' not in prompt

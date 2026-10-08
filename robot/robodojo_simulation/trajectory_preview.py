@@ -164,6 +164,23 @@ def tcp_position(flange_position: Any, flange_quaternion_xyzw: Any, bias_m: floa
     return np.asarray(flange_position, dtype=np.float64).reshape(3) + rotation[:, 0] * float(bias_m)
 
 
+def remount_camera(reported: np.ndarray, flange: np.ndarray, spawn_flange: np.ndarray,
+                   mount_translation: np.ndarray, tolerance_m: float = 0.02) -> np.ndarray | None:
+    """Live pose of a camera rigidly mounted on a flange, or None if it cannot be trusted.
+
+    Isaac reports a link-mounted camera at its spawn pose (the asset's
+    all-zero joint state): physics moves the link in Fabric, not in the USD
+    the camera pose is read from, while the rendered image does follow the
+    link. Whichever of "reported is live" or "reported is the spawn pose"
+    puts the camera where the URDF mounts it is used to re-attach the camera
+    to the measured flange.
+    """
+    candidates = (np.linalg.inv(flange) @ reported, np.linalg.inv(spawn_flange) @ reported)
+    errors = [float(np.linalg.norm(offset[:3, 3] - mount_translation)) for offset in candidates]
+    best = int(np.argmin(errors))
+    return flange @ candidates[best] if errors[best] <= tolerance_m else None
+
+
 def project(points: np.ndarray, intrinsics: np.ndarray, t_env_camera: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Pixel coordinates of env-frame points for a ROS-axes camera, plus visibility."""
     t_camera_env = np.linalg.inv(t_env_camera)
@@ -224,11 +241,12 @@ def _draw_path(image: np.ndarray, points: np.ndarray, visible: np.ndarray, path:
                         0.42 * scale, color, scale, cv2.LINE_AA)
 
 
-def _draw_legend(image: np.ndarray, preview: TrajectoryPreview, scale: int) -> None:
+def _draw_legend(image: np.ndarray, preview: TrajectoryPreview, scale: int, caption: str | None) -> None:
     import cv2
 
-    lines = [(f"{arm}: {ARM_COLOR_NAMES.get(arm, 'white')} gripper-tip path", ARM_COLORS_RGB.get(arm, (255, 255, 255)))
-             for arm in preview.arms]
+    lines = [(caption, (255, 255, 120))] if caption else []
+    lines += [(f"{arm}: {ARM_COLOR_NAMES.get(arm, 'white')} gripper-tip path", ARM_COLORS_RGB.get(arm, (255, 255, 255)))
+              for arm in preview.arms]
     lines += [
         (f"thick = next {preview.execute_steps} steps (execute now), thin = rest of plan", (255, 255, 255)),
         ("ring = now, dot = end of executed part, x = plan end", (255, 255, 255)),
@@ -245,7 +263,7 @@ def _draw_legend(image: np.ndarray, preview: TrajectoryPreview, scale: int) -> N
 
 
 def draw_camera_overlay(rgb: np.ndarray, intrinsics: np.ndarray, t_env_camera: np.ndarray,
-                        preview: TrajectoryPreview) -> np.ndarray:
+                        preview: TrajectoryPreview, caption: str | None = None) -> np.ndarray:
     """Draw every arm's planned TCP path onto one camera view (RGB in, RGB out)."""
     image = np.ascontiguousarray(rgb.copy())
     scale = max(1, int(round(min(image.shape[:2]) / 360)))
@@ -253,7 +271,7 @@ def draw_camera_overlay(rgb: np.ndarray, intrinsics: np.ndarray, t_env_camera: n
         points, visible = project(path.tcp, intrinsics, t_env_camera)
         _draw_path(image, points, visible, path, preview.execute_steps,
                    ARM_COLORS_RGB.get(arm, (255, 255, 255)), scale, arm[0].upper())
-    _draw_legend(image, preview, scale)
+    _draw_legend(image, preview, scale, caption)
     return image
 
 

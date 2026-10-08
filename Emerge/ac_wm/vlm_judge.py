@@ -27,7 +27,10 @@ _PREDICTION_RUBRIC = (
 _OBSERVATION_RUBRIC = (
     "No world-model prediction is available. The images show the CURRENT scene from the robot cameras "
     "before these controls run. When the candidate's planned gripper path is drawn on a view, read it with "
-    "the legend in that image; the top/side schematic shows the same paths to scale in metres. Evaluate "
+    "the legend in that image; the top/side schematic shows the same paths to scale in metres. The head "
+    "view shows the overall route. A wrist view is drawn from where that camera is now and moves with its "
+    "gripper, so use it for the close-range check: is the gripper path lined up with the target object, "
+    "deep enough to grasp, and clear of nearby objects? Evaluate "
     "whether following this plan from the current scene makes useful progress over the CURRENT planning "
     "horizon: check its direction and end point against the visible gripper-to-target relationship, the "
     "gripper open/close timing, and obstacles or collisions along the path. "
@@ -100,9 +103,16 @@ def build_judge_prompt(task: str, candidate: ActionCandidate, rollout: RolloutRe
 def _view_label(stem: str) -> str:
     if stem == "plan_schematic":
         return "top and side schematic of the planned gripper paths (metres)"
-    if stem.endswith("_plan"):
-        return f"{stem[:-len('_plan')]} camera with the planned gripper paths drawn"
-    return f"{stem} camera"
+    planned = stem.endswith("_plan")
+    camera = stem[:-len("_plan")] if planned else stem
+    arm = next((arm for arm in ("left", "right") if f"_{arm}_" in f"_{camera}_"), None)
+    if "wrist" in camera and arm:
+        name = f"{camera} camera (on the {arm} gripper, close-range view)"
+    elif "head" in camera:
+        name = f"{camera} camera (fixed overview)"
+    else:
+        name = f"{camera} camera"
+    return f"{name} with the planned gripper paths drawn" if planned else name
 
 
 def _jpeg_data_url(frame: Any, label: str) -> str:
