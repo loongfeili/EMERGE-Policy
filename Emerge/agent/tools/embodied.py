@@ -393,7 +393,7 @@ class EmbodiedActionTool(Tool):
         actions = tuple(tuple(float(value) for value in row) for row in proposal["actions"])
         metadata = {"execute_steps": int(proposal["execute_steps"]), "source": source,
                     "action_type": action_type, "observation_revision": proposal.get("observation_revision")}
-        for key in ("control_space", "control_description", "observation_images"):
+        for key in ("control_space", "control_description", "observation_images", "preview", "preview_images"):
             if proposal.get(key):
                 metadata[key] = proposal[key]
         candidate = ActionCandidate(candidate_id=candidate_id, skill_name=skill_name,

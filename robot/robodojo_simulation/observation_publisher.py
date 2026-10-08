@@ -54,6 +54,64 @@ def _rotation_from_wxyz(quaternion: Any) -> np.ndarray:
 
 
 @dataclass(frozen=True)
+class AcWmView:
+    """One full-resolution camera frame with its calibration, if known."""
+
+    name: str
+    rgb: np.ndarray
+    intrinsics: np.ndarray | None
+    t_env_camera: np.ndarray | None
+
+
+def write_ac_wm_snapshot(
+    destination: Path,
+    views: Sequence[AcWmView],
+    *,
+    revision: int,
+    annotated: Mapping[str, np.ndarray] | None = None,
+    panels: Sequence[tuple[str, np.ndarray]] = (),
+    fps: float = 20.0,
+) -> dict[str, Any]:
+    """Write the frames AC-WM judges a proposal against.
+
+    The reference (first) view becomes a two-frame video, the world model's
+    vision input. Raw views are kept for audit; ``annotated`` views (the
+    proposal drawn on a camera) and ``panels`` are what the judge sees.
+    """
+    import cv2
+
+    def save(name: str, rgb: np.ndarray) -> str:
+        path = destination / f"{name}.png"
+        if not cv2.imwrite(str(path), np.ascontiguousarray(rgb[..., ::-1])):
+            raise RuntimeError(f"could not write AC-WM observation frame {path}")
+        return str(path)
+
+    if not views:
+        raise RuntimeError("AC-WM snapshot requires at least one camera view")
+    destination.mkdir(parents=True, exist_ok=True)
+    images = [save(view.name, view.rgb) for view in views]
+    annotated = annotated or {}
+    preview_images = [save(f"{view.name}_plan", annotated[view.name]) for view in views if view.name in annotated]
+    preview_images += [save(name, rgb) for name, rgb in panels]
+    reference = views[0].rgb
+    video = destination / f"{views[0].name}.mp4"
+    height, width = reference.shape[:2]
+    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), float(fps), (width, height))
+    if not writer.isOpened():
+        raise RuntimeError(f"could not open AC-WM observation video writer: {video}")
+    try:
+        bgr = np.ascontiguousarray(reference[..., ::-1])
+        writer.write(bgr)
+        writer.write(bgr)
+    finally:
+        writer.release()
+    snapshot = {"observation_path": str(video), "observation_images": images, "observation_revision": revision}
+    if preview_images:
+        snapshot["preview_images"] = preview_images
+    return snapshot
+
+
+@dataclass(frozen=True)
 class _ObservationOutput:
     enabled: bool
     reference: bool
@@ -206,54 +264,56 @@ class RoboDojoObservationPublisher:
             self._archive_revision(manifest_path)
         return manifest_path
 
-    def write_ac_wm_snapshot(
-        self,
-        observation: Mapping[str, Any] | None = None,
-        *,
-        fps: float = 20.0,
-    ) -> dict[str, Any]:
-        """Save the frames AC-WM evaluates a proposal against.
+    def ac_wm_views(self, observation: Mapping[str, Any] | None = None) -> list[AcWmView]:
+        """Return the frames AC-WM evaluates a proposal against, reference first.
 
-        The reference camera becomes a two-frame video, the world model's
-        vision input, and every camera is kept as a PNG for the judge. Without
-        ``observation`` the frames of the latest publish are reused, so a
-        rule-skill preview costs no render and adds no official video frame.
+        Without ``observation`` the frames of the latest publish are reused, so
+        a rule-skill preview costs no render and adds no official video frame.
+        Calibration is read live; the scene has not stepped since the capture.
         """
-        import time
-
-        import cv2
-
         frames = self._vision_frames(observation) if observation is not None else dict(self._latest_frames)
-        reference = frames.get(self._reference)
-        if reference is None:
+        if self._reference not in frames:
             raise RuntimeError(f"AC-WM requires the reference camera {self._reference!r}")
-        destination = self._workspace / "artifacts/ac-wm/observations" / str(time.time_ns())
-        destination.mkdir(parents=True, exist_ok=True)
         ordered = [self._reference] + [name for name in self._requested if name != self._reference]
-        images = []
+        views = []
         for name in ordered:
             if name not in frames:
                 continue
-            path = destination / f"{name}.png"
-            if not cv2.imwrite(str(path), np.ascontiguousarray(frames[name][..., ::-1])):
-                raise RuntimeError(f"could not write AC-WM observation frame {path}")
-            images.append(str(path))
-        video = destination / f"{self._reference}.mp4"
-        height, width = reference.shape[:2]
-        writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), float(fps), (width, height))
-        if not writer.isOpened():
-            raise RuntimeError(f"could not open AC-WM observation video writer: {video}")
-        try:
-            bgr = np.ascontiguousarray(reference[..., ::-1])
-            writer.write(bgr)
-            writer.write(bgr)
-        finally:
-            writer.release()
-        return {
-            "observation_path": str(video),
-            "observation_images": images,
-            "observation_revision": self._revision,
-        }
+            calibration = self._camera_calibration(name)
+            intrinsics, transform = calibration if calibration is not None else (None, None)
+            views.append(AcWmView(name, frames[name], intrinsics, transform))
+        return views
+
+    def write_ac_wm_snapshot(
+        self,
+        views: Sequence[AcWmView],
+        *,
+        annotated: Mapping[str, np.ndarray] | None = None,
+        panels: Sequence[tuple[str, np.ndarray]] = (),
+    ) -> dict[str, Any]:
+        import time
+
+        destination = self._workspace / "artifacts/ac-wm/observations" / str(time.time_ns())
+        return write_ac_wm_snapshot(destination, views, revision=self._revision,
+                                    annotated=annotated, panels=panels)
+
+    def _camera_calibration(self, name: str) -> tuple[np.ndarray, np.ndarray] | None:
+        """Full-resolution intrinsics and ``T_env_camera`` (ROS axes) of one camera."""
+        camera_manager = getattr(self._environment, "camera_manager", None)
+        if camera_manager is None:
+            return None
+        available = list(camera_manager.camera_names[0])
+        if name not in available:
+            return None
+        camera = camera_manager.cameras[0][available.index(name)]
+        intrinsics = _numpy(camera.get_intrinsics_matrix(device="cpu")).astype(np.float64)
+        position, quaternion_wxyz = camera.get_world_pose(camera_axes="ros")
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = _rotation_from_wxyz(quaternion_wxyz)
+        # Reported in the same robodojo_env frame as every pose the agent
+        # commands, so the two are directly comparable.
+        transform[:3, 3] = _numpy(position).astype(np.float64).reshape(3) - self._environment_origin()
+        return intrinsics, transform
 
     def _vision_frames(self, observation: Mapping[str, Any]) -> dict[str, np.ndarray]:
         vision = observation.get("vision") if isinstance(observation, Mapping) else None
@@ -374,7 +434,6 @@ class RoboDojoObservationPublisher:
         if camera_manager is None:
             return []
         available = list(camera_manager.camera_names[0])
-        origin = self._environment_origin()
 
         views: list[_CameraView] = []
         frames = {
@@ -387,11 +446,7 @@ class RoboDojoObservationPublisher:
             if name not in frames:
                 continue
             rgb = frames[name]
-
-            camera = camera_manager.cameras[0][available.index(name)]
-            intrinsics = _numpy(
-                camera.get_intrinsics_matrix(device="cpu")
-            ).astype(np.float64)
+            intrinsics, transform = self._camera_calibration(name)
             # VGGT requires common H/W multiples of 14. Rescale intrinsics
             # with the exact image transform; all perception services and VLM
             # coordinates use these same saved images. Pi0.5 uses get_obs().
@@ -402,14 +457,6 @@ class RoboDojoObservationPublisher:
             intrinsics = scale @ intrinsics
             rgb = np.asarray(Image.fromarray(rgb).resize(
                 (new_width, new_height), Image.Resampling.BILINEAR))
-            position, quaternion_wxyz = camera.get_world_pose(camera_axes="ros")
-            transform = np.eye(4, dtype=np.float64)
-            transform[:3, :3] = _rotation_from_wxyz(quaternion_wxyz)
-            # Reported in the same robodojo_env frame as every pose the agent
-            # commands, so the two are directly comparable.
-            transform[:3, 3] = (
-                _numpy(position).astype(np.float64).reshape(3) - origin
-            )
             existing = self._views.get(name)
             if existing is None:
                 existing = _CameraView(

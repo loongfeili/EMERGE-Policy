@@ -6,10 +6,13 @@ import base64
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
+
+import numpy as np
 
 from .protocol import ActionCandidate, RolloutResult
 
@@ -23,9 +26,11 @@ _PREDICTION_RUBRIC = (
 )
 _OBSERVATION_RUBRIC = (
     "No world-model prediction is available. The images show the CURRENT scene from the robot cameras "
-    "before these controls run. Evaluate whether executing the controls from this scene makes useful "
-    "progress over the CURRENT planning horizon: judge the commanded direction and targets against the "
-    "visible gripper-to-target relationship and obstacles. "
+    "before these controls run. When the candidate's planned gripper path is drawn on a view, read it with "
+    "the legend in that image; the top/side schematic shows the same paths to scale in metres. Evaluate "
+    "whether following this plan from the current scene makes useful progress over the CURRENT planning "
+    "horizon: check its direction and end point against the visible gripper-to-target relationship, the "
+    "gripper open/close timing, and obstacles or collisions along the path. "
 )
 _SCORING_RUBRIC = (
     "A short but clearly goal-directed approach, alignment, grasp preparation, or transport is useful local "
@@ -40,17 +45,64 @@ _SCORING_RUBRIC = (
 )
 
 
+def _sample_steps(rows: int, execute: int) -> list[int]:
+    execute = max(1, min(execute, rows))
+    steps = {int(round(value)) for value in np.linspace(1, execute, min(4, execute))}
+    if rows > execute:
+        steps |= {int(round(value)) for value in np.linspace(execute + 1, rows, min(3, rows - execute))}
+    return sorted(steps)
+
+
+def describe_preview(preview: Mapping[str, Any]) -> str:
+    """Summarize planned end-effector paths as displacements a VLM can reason about."""
+    arms = preview["arms"]
+    rows = len(next(iter(arms.values()))["tcp"]) - 1
+    execute = max(1, min(int(preview["execute_steps"]), rows))
+    lines = [
+        f"Planned motion of each {preview.get('point', 'end-effector')}, computed from the candidate "
+        f"controls ({preview.get('frame', 'metres')}). Steps 1-{execute} of {rows} execute now; later steps "
+        "are the policy's look-ahead. Gripper opening: 0 closed, 1 open."
+    ]
+    for arm, data in arms.items():
+        tcp = np.asarray(data["tcp"], dtype=np.float64)
+        gripper = np.asarray(data["gripper"], dtype=np.float64)
+        delta = (tcp - tcp[0]) * 100.0
+        now = "({:.3f}, {:.3f}, {:.3f}) m".format(*tcp[0])
+        if float(np.max(np.linalg.norm(delta, axis=1))) < 0.5 and float(np.ptp(gripper)) < 0.05:
+            lines.append(f"- {arm} arm: holds still at {now}, gripper {gripper[0]:.2f}.")
+            continue
+        parts = []
+        for step in _sample_steps(rows, execute):
+            tag = " (end of executed part)" if step == execute < rows else ""
+            dx, dy, dz = delta[step]
+            parts.append(f"step {step}{tag}: moved ({dx:+.1f}, {dy:+.1f}, {dz:+.1f}) cm, gripper {gripper[step]:.2f}")
+        lines.append(f"- {arm} arm: now at {now}, gripper {gripper[0]:.2f}; " + "; ".join(parts) + ".")
+    return "\n".join(lines)
+
+
 def build_judge_prompt(task: str, candidate: ActionCandidate, rollout: RolloutResult) -> str:
-    rows = candidate.actions[:min(len(candidate.actions), _PROMPT_ROWS)]
-    controls = json.dumps(rows, separators=(",", ":"))
-    description = str(candidate.metadata.get("control_description") or DEFAULT_CONTROL_DESCRIPTION)
+    preview = candidate.metadata.get("preview")
+    if preview:
+        motion = describe_preview(preview)
+    else:
+        rows = candidate.actions[:min(len(candidate.actions), _PROMPT_ROWS)]
+        controls = json.dumps(rows, separators=(",", ":"))
+        description = str(candidate.metadata.get("control_description") or DEFAULT_CONTROL_DESCRIPTION)
+        motion = f"Candidate controls, first up to {_PROMPT_ROWS} of {len(candidate.actions)} {description}: {controls}"
     predicted = rollout.metadata.get("prediction") != "none"
     return (
-        f"Task: {task}\nCandidate: {candidate.candidate_id}\n"
-        f"Candidate controls, first up to {_PROMPT_ROWS} of {len(candidate.actions)} {description}: {controls}\n"
+        f"Task: {task}\nCandidate: {candidate.candidate_id}\n{motion}\n"
         + (_PREDICTION_RUBRIC if predicted else _OBSERVATION_RUBRIC)
         + _SCORING_RUBRIC
     )
+
+
+def _view_label(stem: str) -> str:
+    if stem == "plan_schematic":
+        return "top and side schematic of the planned gripper paths (metres)"
+    if stem.endswith("_plan"):
+        return f"{stem[:-len('_plan')]} camera with the planned gripper paths drawn"
+    return f"{stem} camera"
 
 
 def _jpeg_data_url(frame: Any, label: str) -> str:
@@ -112,7 +164,7 @@ def judge_content(task: str, candidate: ActionCandidate, rollout: RolloutResult)
     ]
     for label, url in images:
         if not predicted:
-            content.append({"type": "text", "text": f"View: {label}"})
+            content.append({"type": "text", "text": f"View: {_view_label(label)}"})
         content.append({"type": "image_url", "image_url": {"url": url}})
     return content
 

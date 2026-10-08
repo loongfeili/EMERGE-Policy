@@ -16,15 +16,31 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
 
 from robot.mujoco_simulation.pose_utils import PoseUtils
 from robot.robodojo_simulation.tensors import to_float_array, to_numpy
+from robot.robodojo_simulation.trajectory_preview import (
+    ArmPath,
+    TrajectoryPreview,
+    UrdfChain,
+    draw_camera_overlay,
+    draw_plan_schematic,
+    quaternion_xyzw_matrix,
+)
 from robot.vla.robodojo_policy import ACTION_DIM, encode_observation, unpack_joint_actions
 
 _ARM_NAMES = ("left", "right")
+
+
+def _pose_matrix(position: Any, quaternion_xyzw: Any) -> np.ndarray:
+    transform = np.eye(4)
+    transform[:3, :3] = quaternion_xyzw_matrix(quaternion_xyzw)
+    transform[:3, 3] = np.asarray(position, dtype=np.float64).reshape(3)
+    return transform
 
 # AC-WM proposals are bounded so one world-model rollout covers the whole chunk.
 _AC_WM_MAX_ROWS = 64
@@ -114,6 +130,7 @@ class RoboDojoActionController:
             1, int(self.config.get("ac_wm_execute_steps", self.replan_steps))
         )
         self._cancel_check: Callable[[], str | None] | None = None
+        self._kinematic_chains: dict[str, tuple[UrdfChain, tuple[str, ...]]] = {}
 
     def execute(
         self,
@@ -390,13 +407,13 @@ class RoboDojoActionController:
         observation = dict(self._environment.get_obs())
         observation["instruction"] = instruction
         self._publish_observation(observation)
-        snapshot = self._ac_wm_snapshot(observation)
+        views = self._ac_wm_views(observation)
         result = self._policy_client.infer(encode_observation(observation))
         if "actions" not in result:
             raise RuntimeError("Pi0.5 response is missing actions")
         rows = self._action_rows(result["actions"], ACTION_DIM, name="Pi0.5 actions")[:horizon]
         execute_steps = min(execute_limit, max_execute, len(rows))
-        return "VLA_PROPOSAL:" + self._proposal(rows, execute_steps, _JOINT_CONTROL, snapshot)
+        return "VLA_PROPOSAL:" + self._proposal(rows, execute_steps, _JOINT_CONTROL, views)
 
     def _rule_propose(self, params: dict[str, Any]) -> str:
         """Preview a geometric skill as the exact rows it would command."""
@@ -416,8 +433,8 @@ class RoboDojoActionController:
         if self._terminal():
             return self._terminal_action_result("rule_propose")
         rows, control_space = builder(dict(inner))
-        snapshot = self._ac_wm_snapshot()
-        return "RULE_PROPOSAL:" + self._proposal(rows, len(rows), control_space, snapshot)
+        views = self._ac_wm_views()
+        return "RULE_PROPOSAL:" + self._proposal(rows, len(rows), control_space, views)
 
     def _execute_action_chunk(self, params: dict[str, Any]) -> str:
         """Replay exactly the rows AC-WM selected, stopping only at a terminal or arrival."""
@@ -608,28 +625,84 @@ class RoboDojoActionController:
             raise ValueError(f"{name} must be finite")
         return rows
 
-    def _ac_wm_snapshot(self, observation: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _ac_wm_views(self, observation: Mapping[str, Any] | None = None) -> list[Any]:
         publisher = self._observation_publisher
-        if publisher is None or not hasattr(publisher, "write_ac_wm_snapshot"):
+        if publisher is None or not hasattr(publisher, "ac_wm_views"):
             raise RuntimeError("AC-WM proposals require the RoboDojo observation publisher")
         try:
-            return publisher.write_ac_wm_snapshot(observation)
+            return publisher.ac_wm_views(observation)
         except RuntimeError:
             if observation is not None:
                 raise
             # Nothing captured yet this episode: render once rather than fail.
-            return publisher.write_ac_wm_snapshot(dict(self._environment.get_obs()))
+            return publisher.ac_wm_views(dict(self._environment.get_obs()))
 
-    @staticmethod
-    def _proposal(rows: Any, execute_steps: int, control_space: str, snapshot: Mapping[str, Any]) -> str:
-        return json.dumps({
-            "actions": np.asarray(rows, dtype=np.float64).tolist(),
+    def _proposal(self, rows: Any, execute_steps: int, control_space: str, views: list[Any]) -> str:
+        rows = np.asarray(rows, dtype=np.float64)
+        payload: dict[str, Any] = {
+            "actions": rows.tolist(),
             "execute_steps": int(execute_steps),
             "domain_name": _CONTROL_DOMAINS[control_space],
             "control_space": control_space,
             "control_description": _CONTROL_DESCRIPTIONS[control_space],
-            **snapshot,
-        })
+        }
+        annotated: dict[str, np.ndarray] = {}
+        panels: list[tuple[str, np.ndarray]] = []
+        try:
+            preview = self._trajectory_preview(rows, control_space, execute_steps)
+            for view in views:
+                if view.intrinsics is not None and view.t_env_camera is not None:
+                    annotated[view.name] = draw_camera_overlay(view.rgb, view.intrinsics, view.t_env_camera, preview)
+            panels.append(("plan_schematic", draw_plan_schematic(preview)))
+            payload["preview"] = preview.to_json()
+        except Exception as exc:
+            # The proposal stays executable; the judge falls back to the raw rows.
+            annotated, panels = {}, []
+            payload["preview_error"] = f"{type(exc).__name__}: {exc}"
+            print(f"[robodojo] AC-WM trajectory preview failed: {exc}", flush=True)
+        payload.update(self._observation_publisher.write_ac_wm_snapshot(views, annotated=annotated, panels=panels))
+        return json.dumps(payload)
+
+    def _trajectory_preview(self, rows: np.ndarray, control_space: str, execute_steps: int) -> TrajectoryPreview:
+        """Each arm's fingertip path in robodojo_env, starting from where it is now."""
+        manager = self._environment.robot_manager
+        arms: dict[str, ArmPath] = {}
+        for index, arm in enumerate(_ARM_NAMES):
+            robot = self._robot(arm)
+            bias = float(getattr(robot, "gripper_bias", 0.0) or 0.0)
+            position, orientation = self._current_pose_xyzw(arm)
+            now = _pose_matrix(position, orientation)
+            if control_space == _EE_CONTROL:
+                part = rows[:, index * 8:(index + 1) * 8]
+                flanges = [_pose_matrix(row[:3], row[3:7]) for row in part]
+                grippers = part[:, 7]
+            else:
+                part = rows[:, index * 7:(index + 1) * 7]
+                chain, names = self._kinematic_chain(arm)
+                current = to_float_array(manager.get_joint(robot, env_idx_list=[0])[0]).reshape(-1)
+                # Anchored on the measured pose, so any fixed base offset between
+                # the URDF and the simulator cancels and FK is exact right now.
+                anchor = now @ np.linalg.inv(chain.forward(dict(zip(names, current))))
+                flanges = [anchor @ chain.forward(dict(zip(names, row[:6]))) for row in part]
+                grippers = part[:, 6]
+            tcp = [frame[:3, 3] + frame[:3, 0] * bias for frame in [now, *flanges]]
+            arms[arm] = ArmPath(np.asarray(tcp), np.concatenate(([self._current_gripper(arm)], grippers)))
+        return TrajectoryPreview(arms, int(execute_steps))
+
+    def _kinematic_chain(self, arm: str) -> tuple[UrdfChain, tuple[str, ...]]:
+        if arm not in self._kinematic_chains:
+            robot = self._robot(arm)
+            urdf = getattr(robot, "urdf_path", None)
+            names = tuple(getattr(robot, "arm_joints_name", ()) or ())
+            if not urdf or not Path(urdf).is_file() or len(names) != 6:
+                raise RuntimeError(f"RoboDojo {arm} arm has no usable URDF for forward kinematics")
+            chain = UrdfChain.from_urdf(urdf, getattr(robot, "base_link", "base_link"), robot.ee_link_name)
+            if set(chain.movable_joints) != set(names):
+                raise RuntimeError(
+                    f"URDF chain joints {chain.movable_joints} do not match the {arm} arm joints {names}"
+                )
+            self._kinematic_chains[arm] = (chain, names)
+        return self._kinematic_chains[arm]
 
     def _resolve_targets(
         self,

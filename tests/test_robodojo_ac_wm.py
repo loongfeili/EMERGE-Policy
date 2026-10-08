@@ -26,17 +26,50 @@ def _proposal(result, marker):
     return json.loads(result[len(marker):])
 
 
+def write_arm_urdf(path):
+    """Six revolute joints, base_link -> link6, with a camera link hanging off link6."""
+    joints = [('joint1', 'base_link', 'link1', '0 0 0.1', '0 0 1'),
+              ('joint2', 'link1', 'link2', '0 0 0.05', '0 1 0'),
+              ('joint3', 'link2', 'link3', '0.25 0 0', '0 1 0'),
+              ('joint4', 'link3', 'link4', '0.2 0 0', '0 1 0'),
+              ('joint5', 'link4', 'link5', '0.05 0 0', '0 0 1'),
+              ('joint6', 'link5', 'link6', '0.03 0 0', '1 0 0')]
+    body = ''.join(f'<link name="{name}"/>' for name in ['base_link'] + [j[2] for j in joints] + ['camera'])
+    body += ''.join(
+        f'<joint name="{n}" type="revolute"><origin xyz="{xyz}" rpy="0 0 0"/><parent link="{p}"/>'
+        f'<child link="{c}"/><axis xyz="{axis}"/></joint>' for n, p, c, xyz, axis in joints)
+    body += ('<joint name="cam" type="fixed"><origin xyz="0.05 0 0.05" rpy="0 0.3 0"/>'
+             '<parent link="link6"/><child link="camera"/></joint>')
+    path.write_text(f'<robot name="arm">{body}</robot>')
+    return path
+
+
+def top_down_camera(height=120, width=160):
+    """A head camera 1.6 m up looking straight down, image top toward +y."""
+    intrinsics = np.array([[100., 0, width / 2], [0, 100., height / 2], [0, 0, 1]])
+    transform = np.eye(4)
+    transform[:3, :3] = np.diag([1., -1., -1.])
+    transform[:3, 3] = [0.1, -0.2, 1.6]
+    return intrinsics, transform
+
+
 class Cell:
     """Native RoboDojo protocol model: arms track each command exactly."""
 
-    def __init__(self, tmp_path, *, success_after=None, fail_after=None):
+    def __init__(self, tmp_path, *, success_after=None, fail_after=None, urdf=True, calibrated=True):
+        from robot.robodojo_simulation.observation_publisher import AcWmView, write_ac_wm_snapshot
+
         self.poses = {arm: np.array([.1, -.2, .8, 1., 0., 0., 0.]) for arm in ARMS}
         self.joints = {arm: np.arange(6, dtype=float) * .1 for arm in ARMS}
         self.grippers = {arm: .022 for arm in ARMS}
         self.actions = []
         self.success_after = success_after
         self.fail_after = fail_after
-        robots = {arm: SimpleNamespace(arm=arm, gripper_scale=[0., .044], gripper_move={'sign': 1})
+        urdf_path = write_arm_urdf(tmp_path / 'arm.urdf') if urdf else None
+        robots = {arm: SimpleNamespace(arm=arm, gripper_scale=[0., .044], gripper_move={'sign': 1},
+                                       urdf_path=str(urdf_path) if urdf_path else None, base_link='base_link',
+                                       ee_link_name='link6', gripper_bias=0.145,
+                                       arm_joints_name=[f'joint{i}' for i in range(1, 7)])
                   for arm in ARMS}
         manager = SimpleNamespace(
             get_robot_by_arm_name=lambda name: robots[name.removesuffix('_arm')],
@@ -46,17 +79,23 @@ class Cell:
         )
         self.env = SimpleNamespace(robot_manager=manager, take_action=self.step, end_flag=[False],
                                    success=[False], get_obs=lambda: {'vision': {}})
-        self.snapshots = []
+        self.view_requests = []
+        self.snapshot_calls = []
         self.published = []
-        frame = tmp_path / 'cam_head.png'
-        cv2.imwrite(str(frame), np.full((8, 8, 3), 120, np.uint8))
+        intrinsics, transform = top_down_camera() if calibrated else (None, None)
+        frame = np.full((120, 160, 3), 120, np.uint8)
 
-        def snapshot(observation=None):
-            self.snapshots.append(observation)
-            return {'observation_path': str(tmp_path / 'cam_head.mp4'),
-                    'observation_images': [str(frame)], 'observation_revision': len(self.snapshots)}
+        def views(observation=None):
+            self.view_requests.append(observation)
+            return [AcWmView('cam_head', frame, intrinsics, transform)]
 
-        self.publisher = SimpleNamespace(write_ac_wm_snapshot=snapshot, publish=self.published.append)
+        def snapshot(views, *, annotated=None, panels=()):
+            self.snapshot_calls.append({'annotated': dict(annotated or {}), 'panels': list(panels)})
+            return write_ac_wm_snapshot(tmp_path / f'snapshot_{len(self.snapshot_calls)}', views,
+                                        revision=len(self.snapshot_calls), annotated=annotated, panels=panels)
+
+        self.publisher = SimpleNamespace(ac_wm_views=views, write_ac_wm_snapshot=snapshot,
+                                         publish=self.published.append)
 
     def step(self, action):
         self.actions.append(action)
@@ -92,7 +131,16 @@ def test_move_linear_preview_is_ee16_and_holds_the_other_arm(tmp_path):
     np.testing.assert_allclose(rows[3, :3], [.1, -.2, .88])
     np.testing.assert_allclose(rows[:, 3:7], np.tile([0., 0., 0., 1.], (len(rows), 1)))
     np.testing.assert_allclose(rows[:, 8:16], np.tile([.1, -.2, .8, 0., 0., 0., 1., .5], (len(rows), 1)))
-    assert cell.actions == [] and cell.snapshots == [None]
+    assert cell.actions == [] and cell.view_requests == [None]
+
+    # The judge sees fingertip positions: 0.145 m along the flange's +x.
+    left = np.asarray(proposal['preview']['arms']['left']['tcp'])
+    np.testing.assert_allclose(left[0], [.245, -.2, .8], atol=1e-4)
+    np.testing.assert_allclose(left[4], [.245, -.2, .88], atol=1e-4)
+    right = np.asarray(proposal['preview']['arms']['right']['tcp'])
+    np.testing.assert_allclose(right, np.tile([.245, -.2, .8], (len(right), 1)), atol=1e-4)
+    assert [Path(path).name for path in proposal['preview_images']] == ['cam_head_plan.png', 'plan_schematic.png']
+    assert all(Path(path).is_file() for path in proposal['preview_images'])
 
 
 def test_every_geometric_skill_previews_without_moving(tmp_path):
@@ -191,12 +239,119 @@ def test_vla_proposal_infers_from_a_published_observation_without_stepping(tmp_p
     assert (proposal['domain_name'], proposal['control_space']) == ('robodojo_joint', 'robodojo_joint14')
     assert seen[0]['instruction'] == 'stack the bowls'
     assert cell.published[0]['instruction'] == 'stack the bowls'
-    assert cell.snapshots[0]['instruction'] == 'stack the bowls'
+    assert cell.view_requests[0]['instruction'] == 'stack the bowls'
     assert cell.actions == []
+    preview = proposal['preview']
+    assert preview['execute_steps'] == 7
+    assert {arm: len(data['tcp']) for arm, data in preview['arms'].items()} == {'left': 51, 'right': 51}
+    assert 'preview_error' not in proposal
 
     proposal = _proposal(cell.controller(policy, {'ac_wm_execute_steps': 25}).execute('vla_propose', {
         'instruction': 'stack the bowls', 'horizon': 64, 'max_execute_steps': 100}), 'VLA_PROPOSAL:')
     assert proposal['execute_steps'] == 25
+
+
+def test_joint_proposal_preview_follows_forward_kinematics_from_the_measured_pose(tmp_path, monkeypatch):
+    from robot.robodojo_simulation.trajectory_preview import UrdfChain
+
+    monkeypatch.setattr(controller_module, 'encode_observation', lambda observation: dict(observation))
+    cell = Cell(tmp_path)
+    rows = np.tile(np.concatenate([cell.joints['left'], [0.], cell.joints['right'], [.5]]), (3, 1))
+    rows[1:, 0] += .3  # left joint1 turns; the right arm holds
+    policy = SimpleNamespace(infer=lambda element: {'actions': rows})
+    proposal = _proposal(cell.controller(policy).execute('vla_propose', {
+        'instruction': 'reach', 'horizon': 64, 'max_execute_steps': 2}), 'VLA_PROPOSAL:')
+    left = np.asarray(proposal['preview']['arms']['left']['tcp'])
+    gripper = proposal['preview']['arms']['left']['gripper']
+    chain = UrdfChain.from_urdf(tmp_path / 'arm.urdf', 'base_link', 'link6')
+    names = chain.movable_joints
+    now = np.eye(4)
+    now[:3, 3] = [.1, -.2, .8]
+    expected = now @ np.linalg.inv(chain.forward(dict(zip(names, cell.joints['left'])))) @ chain.forward(
+        dict(zip(names, rows[1, :6])))
+    np.testing.assert_allclose(left[0], [.245, -.2, .8], atol=1e-4)
+    np.testing.assert_allclose(left[1], left[0], atol=1e-4)
+    np.testing.assert_allclose(left[2], expected[:3, 3] + expected[:3, 0] * .145, atol=1e-4)
+    assert np.linalg.norm(left[2] - left[0]) > .05
+    assert gripper == [.5, 0., 0., 0.]
+    right = np.asarray(proposal['preview']['arms']['right']['tcp'])
+    np.testing.assert_allclose(right, np.tile(right[0], (4, 1)), atol=1e-4)
+
+
+def test_preview_failure_keeps_the_proposal_executable(tmp_path, monkeypatch):
+    monkeypatch.setattr(controller_module, 'encode_observation', lambda observation: dict(observation))
+    cell = Cell(tmp_path, urdf=False)
+    policy = SimpleNamespace(infer=lambda element: {'actions': np.zeros((5, 14))})
+    proposal = _proposal(cell.controller(policy).execute('vla_propose', {'instruction': 'reach'}), 'VLA_PROPOSAL:')
+    assert 'URDF' in proposal['preview_error']
+    assert 'preview' not in proposal and 'preview_images' not in proposal
+    assert len(proposal['actions']) == 5
+
+    (tmp_path / 'uncalibrated').mkdir()
+    uncalibrated = Cell(tmp_path / 'uncalibrated', calibrated=False)
+    proposal = _proposal(uncalibrated.controller().execute('rule_propose', {
+        'skill_action_type': 'move_linear', 'parameters': {'arm': 'left', 'delta_m': [0, 0, .05], 'steps': 2}}),
+        'RULE_PROPOSAL:')
+    assert [Path(path).name for path in proposal['preview_images']] == ['plan_schematic.png']
+
+
+def test_x5_urdf_forward_kinematics_matches_isaac():
+    """Joint state and link6 pose recorded together from a RoboDojo episode."""
+    from robot.robodojo_simulation.trajectory_preview import UrdfChain, quaternion_xyzw_matrix
+
+    urdf = ROOT.parent / 'RoboDojo/Assets/Robots/x5/X5A.urdf'
+    if not urdf.is_file():
+        pytest.skip('RoboDojo X5 assets are not checked out next to this repository')
+    chain = UrdfChain.from_urdf(urdf, 'base_link', 'link6')
+    assert chain.movable_joints == tuple(f'joint{i}' for i in range(1, 7))
+    base = np.eye(4)
+    base[:3, :3] = quaternion_xyzw_matrix([0, 0, .707, .707])
+    base[:3, 3] = [-.3, -.45, .765]
+    joints = [0.2912435, 1.2046055, 0.9722512, -0.7556549, 0.1610454, 0.2401642]
+    link6 = base @ chain.forward(dict(zip(chain.movable_joints, joints)))
+    np.testing.assert_allclose(link6[:3, 3], [-0.3611239, -0.2284229, 1.0296503], atol=1e-3)
+    measured = quaternion_xyzw_matrix([-0.3295047, 0.3289767, 0.6269394, 0.6246183])
+    assert np.degrees(np.arccos(np.clip((np.trace(measured.T @ link6[:3, :3]) - 1) / 2, -1, 1))) < .5
+
+
+def test_projection_and_drawings():
+    from robot.robodojo_simulation.trajectory_preview import (
+        ArmPath, TrajectoryPreview, draw_camera_overlay, draw_plan_schematic, project)
+
+    intrinsics, transform = top_down_camera()
+    pixels, visible = project(np.array([[.1, -.2, .8], [.2, -.2, .8], [.1, -.1, .8], [.1, -.2, 1.7]]),
+                              intrinsics, transform)
+    np.testing.assert_allclose(pixels[:3], [[80, 60], [92.5, 60], [80, 47.5]])
+    assert visible.tolist() == [True, True, True, False]
+
+    still = ArmPath(np.tile([.4, -.2, .8], (6, 1)), np.ones(6))
+    moving = ArmPath(np.linspace([.1, -.2, .8], [.1, -.05, .75], 6), np.array([1, 1, 1, 0, 0, 0.]))
+    preview = TrajectoryPreview({'left': moving, 'right': still}, 2)
+    frame = np.full((120, 160, 3), 90, np.uint8)
+    overlay = draw_camera_overlay(frame, intrinsics, transform, preview)
+    assert overlay.shape == frame.shape and np.any(overlay != frame)
+    assert np.array_equal(frame, np.full((120, 160, 3), 90, np.uint8))
+    assert draw_plan_schematic(preview).shape == (360, 722, 3)
+    both = TrajectoryPreview({'left': moving, 'right': ArmPath(moving.tcp + [.5, 0, 0], moving.gripper)}, 2)
+    assert draw_plan_schematic(both).shape == (722, 722, 3)
+
+
+def test_judge_describes_fingertip_displacements_instead_of_joint_angles():
+    from Emerge.ac_wm import ActionCandidate, RolloutResult
+    from Emerge.ac_wm.vlm_judge import build_judge_prompt, describe_preview
+
+    preview = {'frame': 'robodojo_env frame', 'point': 'gripper fingertip centre (TCP)', 'execute_steps': 2,
+               'arms': {'left': {'tcp': [[0, 0, .9], [0, .01, .88], [0, .02, .86], [0, .03, .84]],
+                                 'gripper': [1, 1, 1, 0]},
+                        'right': {'tcp': [[.3, 0, .9]] * 4, 'gripper': [1, 1, 1, 1]}}}
+    text = describe_preview(preview)
+    assert 'Steps 1-2 of 3 execute now' in text
+    assert 'step 2 (end of executed part): moved (+0.0, +2.0, -4.0) cm, gripper 1.00' in text
+    assert 'step 3: moved (+0.0, +3.0, -6.0) cm, gripper 0.00' in text
+    assert '- right arm: holds still at (0.300, 0.000, 0.900) m' in text
+    candidate = ActionCandidate('c', 'vla', ((0.123456,) * 14,) * 3, {'preview': preview})
+    prompt = build_judge_prompt('reach', candidate, RolloutResult('c', 'success', metadata={'prediction': 'none'}))
+    assert '0.123456' not in prompt and 'planned gripper path is drawn' in prompt
 
 
 def test_publisher_snapshot_reuses_the_latest_frames(tmp_path):
@@ -211,8 +366,13 @@ def test_publisher_snapshot_reuses_the_latest_frames(tmp_path):
     head[..., 0] = 200
     publisher.publish({'vision': {'cam_head': {'color': head},
                                   'cam_left_wrist': {'color': np.zeros((48, 64, 3), np.uint8)}}})
-    snapshot = publisher.write_ac_wm_snapshot()
+    views = publisher.ac_wm_views()
+    assert [view.name for view in views] == names
+    np.testing.assert_allclose(views[0].intrinsics, k)
+    np.testing.assert_allclose(views[0].t_env_camera[:3, 3], [0., 0., 2.])
+    snapshot = publisher.write_ac_wm_snapshot(views)
     assert snapshot['observation_revision'] == publisher.revision == 1
+    assert 'preview_images' not in snapshot
     assert [Path(path).name for path in snapshot['observation_images']] == ['cam_head.png', 'cam_left_wrist.png']
     saved = cv2.imread(snapshot['observation_images'][0])
     assert saved.shape == (48, 64, 3) and saved[0, 0, 2] == 200  # RGB red stored as BGR
@@ -220,7 +380,7 @@ def test_publisher_snapshot_reuses_the_latest_frames(tmp_path):
     assert int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) == 2
     capture.release()
     with pytest.raises(RuntimeError, match='reference camera'):
-        RoboDojoObservationPublisher(env, workspace=tmp_path / 'fresh', camera_names=names).write_ac_wm_snapshot()
+        RoboDojoObservationPublisher(env, workspace=tmp_path / 'fresh', camera_names=names).ac_wm_views()
 
 
 def test_driver_does_not_republish_after_a_non_stepping_proposal():
@@ -331,7 +491,13 @@ def test_robodojo_actions_flow_through_ac_wm_end_to_end(tmp_path, monkeypatch):
     result = json.loads(asyncio.run(tool.execute('vla_execute', {'instruction': 'stack', 'step': 20}, 'r')))
     assert (result['status'], result['steps_executed'], len(result['chunks'])) == ('success', 20, 2)
     assert len(cell.actions) - moved == 20
-    assert judged[-1][1].metadata['control_space'] == 'robodojo_joint14'
+    _, candidate, rollout = judged[-1]
+    assert candidate.metadata['control_space'] == 'robodojo_joint14'
+    # The judge gets the drawn fingertip paths, never the joint rows.
+    assert [Path(frame).name for frame in rollout.metadata['frames']] == ['cam_head_plan.png', 'plan_schematic.png']
+    from Emerge.ac_wm.vlm_judge import build_judge_prompt
+    prompt = build_judge_prompt('stack', candidate, rollout)
+    assert 'gripper fingertip centre' in prompt and 'Candidate controls' not in prompt
 
 
 def _eval_module():
