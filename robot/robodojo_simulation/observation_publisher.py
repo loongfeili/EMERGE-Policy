@@ -15,7 +15,7 @@ RoboDojo's camera accessors to the interface that writer expects.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -205,6 +205,10 @@ class RoboDojoObservationPublisher:
         self._revision = 0
         # Full-resolution frames of the latest capture, before the VGGT resize.
         self._latest_frames: dict[str, np.ndarray] = {}
+        # Maps (camera name, reported T_env_camera) to the pose the frame was
+        # rendered from, or None if unknown. Isaac reports link-mounted
+        # cameras at their spawn pose, so wrist cameras need the live arm.
+        self.camera_pose: Callable[[str, np.ndarray], np.ndarray | None] | None = None
 
     @property
     def revision(self) -> int:
@@ -313,6 +317,14 @@ class RoboDojoObservationPublisher:
         # Reported in the same robodojo_env frame as every pose the agent
         # commands, so the two are directly comparable.
         transform[:3, 3] = _numpy(position).astype(np.float64).reshape(3) - self._environment_origin()
+        if self.camera_pose is not None:
+            try:
+                live = self.camera_pose(name, transform)
+            except Exception as exc:
+                live = None
+                print(f"[robodojo] {name} live camera pose failed: {exc}", flush=True)
+            if live is not None:
+                transform = live
         return intrinsics, transform
 
     def _vision_frames(self, observation: Mapping[str, Any]) -> dict[str, np.ndarray]:

@@ -57,6 +57,8 @@ class RoboDojoDriver(BaseDriver):
             observation_publisher=self._observations,
             stall_probe=self._stall_probe,
         )
+        if self._observations is not None:
+            self._observations.camera_pose = self._actions.live_camera_pose
         self._close_environment = bool(close_environment)
         self._connected = True
 

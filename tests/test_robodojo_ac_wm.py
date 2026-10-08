@@ -470,6 +470,41 @@ def test_publisher_snapshot_reuses_the_latest_frames(tmp_path):
         RoboDojoObservationPublisher(env, workspace=tmp_path / 'fresh', camera_names=names).ac_wm_views()
 
 
+def test_published_manifest_uses_the_live_camera_pose(tmp_path):
+    k = np.array([[400., 0, 320], [0, 400, 240], [0, 0, 1]])
+    camera = SimpleNamespace(get_intrinsics_matrix=lambda **kw: k,
+                             get_world_pose=lambda **kw: (np.array([0., 0., 2.]), np.array([1., 0, 0, 0])))
+    names = ['cam_head', 'cam_left_wrist', 'cam_right_wrist']
+    env = SimpleNamespace(camera_manager=SimpleNamespace(camera_names=[names], cameras=[[camera] * 3]),
+                          env_origins=np.zeros((1, 3)))
+    publisher = RoboDojoObservationPublisher(env, workspace=tmp_path, camera_names=names)
+    live = np.eye(4)
+    live[:3, 3] = [.3, -.1, .9]
+    calls = []
+
+    def camera_pose(name, reported):
+        calls.append(name)
+        return {'cam_head': reported, 'cam_left_wrist': live}.get(name)
+
+    publisher.camera_pose = camera_pose
+    frame = np.zeros((48, 64, 3), np.uint8)
+    publisher.publish({'vision': {name: {'color': frame} for name in names}})
+    manifest = json.loads((tmp_path / 'artifacts/observations/observation.json').read_text())
+    views = {view['name']: np.asarray(view['T_world_camera']) for view in manifest['views']}
+    np.testing.assert_allclose(views['cam_head'][:3, 3], [0, 0, 2])
+    np.testing.assert_allclose(views['cam_left_wrist'], live)
+    # An unknown live pose keeps what Isaac reported rather than dropping the view.
+    np.testing.assert_allclose(views['cam_right_wrist'][:3, 3], [0, 0, 2])
+    assert calls == names
+
+
+def test_driver_feeds_live_camera_poses_to_its_publisher(tmp_path):
+    from robot.drivers.robodojo_driver import RoboDojoDriver
+
+    driver = RoboDojoDriver(SimpleNamespace(sim=object()), workspace=tmp_path)
+    assert driver._observations.camera_pose == driver._actions.live_camera_pose
+
+
 def test_driver_does_not_republish_after_a_non_stepping_proposal():
     from robot.drivers.robodojo_driver import RoboDojoDriver
 

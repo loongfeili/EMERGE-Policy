@@ -133,6 +133,7 @@ class RoboDojoActionController:
         self._cancel_check: Callable[[], str | None] | None = None
         self._kinematic_chains: dict[str, tuple[UrdfChain, tuple[str, ...]]] = {}
         self._wrist_mounts: dict[str, np.ndarray] = {}
+        self._camera_pose_warnings: set[str] = set()
 
     def execute(
         self,
@@ -654,7 +655,10 @@ class RoboDojoActionController:
             preview = self._trajectory_preview(rows, control_space, execute_steps)
             for view in views:
                 arm = self._wrist_arm(view.name)
-                transform = self._live_camera_pose(view, arm)
+                # Views normally arrive already re-attached; this only rejects
+                # a wrist pose the publisher had to leave as reported.
+                transform = (self.live_camera_pose(view.name, view.t_env_camera)
+                             if view.t_env_camera is not None else None)
                 if view.intrinsics is not None and transform is not None:
                     caption = f"{arm} wrist camera, moves with the {arm} gripper" if arm else None
                     annotated[view.name] = draw_camera_overlay(view.rgb, view.intrinsics, transform, preview, caption)
@@ -700,10 +704,15 @@ class RoboDojoActionController:
             return None
         return next((arm for arm in _ARM_NAMES if f"_{arm}_" in f"_{camera_name}_"), None)
 
-    def _live_camera_pose(self, view: Any, arm: str | None) -> np.ndarray | None:
-        """``T_env_camera`` at the moment the frame was rendered; None when unknown."""
-        if view.t_env_camera is None or arm is None:
-            return view.t_env_camera
+    def live_camera_pose(self, camera_name: str, reported: np.ndarray) -> np.ndarray | None:
+        """``T_env_camera`` the current frame was rendered from; None when unknown.
+
+        Static cameras are reported correctly. Wrist cameras are reported at
+        their spawn pose and are re-attached to the measured flange.
+        """
+        arm = self._wrist_arm(camera_name)
+        if arm is None:
+            return reported
         try:
             chain, names = self._kinematic_chain(arm)
             robot = self._robot(arm)
@@ -714,12 +723,15 @@ class RoboDojoActionController:
             ).reshape(-1)
             base = flange @ np.linalg.inv(chain.forward(dict(zip(names, current))))
             spawn = base @ chain.forward(dict.fromkeys(names, 0.0))
-            pose = remount_camera(view.t_env_camera, flange, spawn, self._wrist_mount_translation(arm))
-        except (RuntimeError, ValueError) as exc:
-            print(f"[robodojo] AC-WM {view.name} calibration unavailable: {exc}", flush=True)
-            return None
-        if pose is None:
-            print(f"[robodojo] AC-WM {view.name} pose does not match its URDF mount; path not drawn", flush=True)
+            pose = remount_camera(np.asarray(reported, dtype=np.float64), flange, spawn,
+                                  self._wrist_mount_translation(arm))
+            problem = None if pose is not None else "reported pose matches neither its live nor its spawn mount"
+        except Exception as exc:
+            # Calibration is best effort; it must never stop an observation.
+            pose, problem = None, f"{type(exc).__name__}: {exc}"
+        if problem and camera_name not in self._camera_pose_warnings:
+            self._camera_pose_warnings.add(camera_name)
+            print(f"[robodojo] {camera_name} live pose unavailable: {problem}", flush=True)
         return pose
 
     def _wrist_mount_translation(self, arm: str) -> np.ndarray:
